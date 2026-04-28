@@ -1,0 +1,46 @@
+name: macro-etl
+
+on:
+  schedule:
+    # Macro series refresh hourly (most update monthly anyway, this keeps
+    # markets / news / GDELT fresh and is well within free Actions quota).
+    - cron: "0 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  etl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    concurrency:
+      group: macro-etl
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+      - name: Run ETL
+        env:
+          FRED_KEY: ${{ secrets.FRED_KEY }}
+          EIA_KEY:  ${{ secrets.EIA_KEY }}
+        run: python -m etl.run_all
+      - name: Mirror data into public/ for static deploy
+        run: |
+          mkdir -p public/data
+          cp -f data/*.json public/data/
+      - name: Commit data updates
+        run: |
+          git config user.name  "macro-etl-bot"
+          git config user.email "macro-etl-bot@users.noreply.github.com"
+          git add data/ public/data/
+          if git diff --cached --quiet; then
+            echo "No data changes."
+          else
+            git commit -m "data: refresh $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push
+          fi

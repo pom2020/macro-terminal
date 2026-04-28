@@ -1,0 +1,13 @@
+name = "macro-intraday"
+main = "intraday.js"
+compatibility_date = "2025-01-01"
+
+# Provision a KV namespace once with:
+#   wrangler kv:namespace create CACHE
+# then paste the resulting id here:
+[[kv_namespaces]]
+binding = "CACHE"
+id = "REPLACE_ME_WITH_KV_NAMESPACE_ID"
+
+# Optional custom domain:
+# routes = [{ pattern = "macro-intraday.example.com/*", custom_domain = true }]
