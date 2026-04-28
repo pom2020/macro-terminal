@@ -16,8 +16,12 @@ def _load(section: str) -> dict:
 
 
 def _score(z: float, neutral: float = 50, span: float = 25) -> float:
-    """Map a z-score-like input to 0..100, where 50 is neutral."""
-    return max(0, min(100, neutral + z * span))
+    """Map a z-score-like input to 0..100, where 50 is neutral.
+
+    Rounded to 1 decimal so the React table doesn't show IEEE-754 noise like
+    '59.833333333333336' for what should display as '59.8'.
+    """
+    return round(max(0, min(100, neutral + z * span)), 1)
 
 
 def _composite(metrics: list[float | None]) -> int:
