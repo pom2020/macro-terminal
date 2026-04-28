@@ -17,7 +17,7 @@ import os
 import re
 
 from etl._common import (utcnow_iso, write_json, safe, gdelt_articles,
-                          fred_release_dates)
+                          fred_release_dates, google_news_rss)
 
 
 # Topic queries (each maps to a section / region tag).
@@ -83,7 +83,48 @@ def _format_seen_at(seendate: str | None) -> tuple[str, str]:
         return ("", "")
 
 
+# Google News query per tag — used to add summary text to each GDELT title
+GNEWS_QUERIES = {
+    "FED":    "Federal Reserve interest rate",
+    "ECB":    "European Central Bank rate",
+    "DATA":   "US economic data",
+    "PBoC":   "China economy",
+    "BoJ":    "Bank of Japan",
+    "OIL":    "oil prices",
+    "CREDIT": "bond yields credit",
+    "FISCAL": "US federal deficit",
+}
+
+
+def _fetch_summaries_per_tag() -> dict[str, list[dict]]:
+    """Pull Google News RSS once per tag, return list of items with summary."""
+    out: dict[str, list[dict]] = {}
+    for tag, q in GNEWS_QUERIES.items():
+        items = safe(google_news_rss, q, max_items=8, default=[]) or []
+        out[tag] = items
+    return out
+
+
+def _match_summary(gnews_items: list[dict], gdelt_title: str) -> str:
+    """Find the closest matching Google News summary for a GDELT title."""
+    if not gnews_items or not gdelt_title:
+        return ""
+    # Score by word overlap
+    target_words = set(gdelt_title.lower().split())
+    best = ("", 0)
+    for it in gnews_items:
+        t = (it.get("title") or "").lower()
+        s = (it.get("summary") or "")
+        if not s:
+            continue
+        score = len(target_words & set(t.split()))
+        if score > best[1]:
+            best = (s, score)
+    return best[0][:280] if best[1] >= 2 else ""
+
+
 def _fetch_headlines() -> list[dict]:
+    summaries_by_tag = _fetch_summaries_per_tag()
     items: list[dict] = []
     for tag, region, query in TOPIC_QUERIES:
         # First attempt: with sourcelang:english filter at GDELT
@@ -108,6 +149,11 @@ def _fetch_headlines() -> list[dict]:
                 tone = float(tone) if tone not in (None, "") else None
             except (TypeError, ValueError):
                 tone = None
+            title = (a.get("title") or "")[:160]
+            # Try to attach a real summary from Google News RSS by topic
+            summary = _match_summary(summaries_by_tag.get(tag, []), title)
+            if not summary:
+                summary = title[:280]   # fall back to title
             items.append({
                 "time": time_str or "",
                 "date": date_str or "",
@@ -116,8 +162,8 @@ def _fetch_headlines() -> list[dict]:
                            else "high" if tag in HIGH_TAGS else "med",
                 "sentiment": _classify_sentiment(tone),
                 "tag": tag,
-                "title": (a.get("title") or "")[:160],
-                "summary": (a.get("title") or "")[:280],   # GDELT artlist has no body
+                "title": title,
+                "summary": summary,
                 "moved": [],   # left empty; we don't have desk attribution
                 "_seendate": a.get("seendate") or "",
                 "_url": a.get("url") or "",

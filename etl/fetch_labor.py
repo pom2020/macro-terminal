@@ -10,9 +10,18 @@ def build() -> dict:
     u6 = fred("U6RATE") or []
     lfpr = fred("CIVPART") or []
     nfp = fred("PAYEMS") or []
-    jolts = fred("JTSJOL") or []
+    jolts = fred("JTSJOL") or []      # Job Openings
+    hires = fred("JTSHIL") or []      # Hires (NEW)
+    quits = fred("JTSQUL") or []      # Quits (NEW)
+    eci = fred("ECIALLCIV") or []     # Employment Cost Index (NEW)
     ahe = fred("CES0500000003") or []
     ahe_yoy = yoy_pct(ahe)
+    ahe_mom = []
+    for i in range(1, len(ahe)):
+        prev = ahe[i-1][1]
+        if prev:
+            ahe_mom.append((ahe[i][0], round((ahe[i][1] / prev - 1) * 100, 2)))
+    eci_yoy = yoy_pct(eci)
 
     # Beveridge curve: pair (UNRATE, openings_rate) by month, last 36 months
     open_rate = safe(fred, "JTSJOR", default=[]) or []  # JOLTS opening rate
@@ -60,10 +69,16 @@ def build() -> dict:
         },
         "jolts": {
             "openings": jolts[-1][1] if jolts else None,
+            "hires":    hires[-1][1] if hires else None,
+            "quits":    quits[-1][1] if quits else None,
+            "ratio":    (jolts[-1][1] / u3[-1][1] / 1000)
+                          if jolts and u3 and u3[-1][1] else None,
             "openings_series": trim(jolts, 36),
         },
         "wages": {
-            "ahe_yoy": ahe_yoy[-1][1] if ahe_yoy else None,
+            "ahe_yoy":  ahe_yoy[-1][1] if ahe_yoy else None,
+            "ahe_mom":  ahe_mom[-1][1] if ahe_mom else None,
+            "eci_yoy":  eci_yoy[-1][1] if eci_yoy else None,
             "nominal_yoy": ahe_yoy[-1][1] if ahe_yoy else None,
             "series": trim(ahe_yoy, 60),
         },

@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from etl._common import (fred, fred_latest, yoy_pct, trim, utcnow_iso,
                           write_json, safe, stooq_daily, yahoo_chart,
-                          cnn_fear_greed, cboe_put_call_latest)
+                          cnn_fear_greed, cboe_put_call_latest,
+                          ytd_pct, yoy_change, moving_avg)
 
 
 def _idx(symbol: str, label: str) -> dict | None:
@@ -17,8 +18,12 @@ def _idx(symbol: str, label: str) -> dict | None:
     last = s[-1][1]
     prev = s[-2][1] if len(s) > 1 else last
     chg = round((last / prev - 1) * 100, 2) if prev else 0
-    return {"label": label, "price": last, "chg_pct": chg,
-            "series": trim(s, 252)}
+    return {
+        "label": label, "price": last, "chg_pct": chg,
+        "ytd": ytd_pct(s),                  # NEW
+        "yoy": yoy_change(s),                # NEW
+        "series": trim(s, 252),
+    }
 
 
 def build() -> dict:
@@ -34,6 +39,13 @@ def build() -> dict:
     cs_yoy = yoy_pct(case_shiller)
     mortgage = fred("MORTGAGE30US") or []
     starts = fred("HOUST") or []
+    permits = fred("PERMIT") or []           # NEW: building permits
+    # NYSE breadth proxy — A/D Line via Stooq (free)
+    nyad = safe(stooq_daily, "^nyad", default=[]) or []
+    # SPX for MA50/MA200 — use FRED's daily SP500 series
+    spx_daily = fred("SP500") or []
+    ma50_series  = moving_avg(spx_daily, 50)
+    ma200_series = moving_avg(spx_daily, 200)
 
     fg = safe(cnn_fear_greed, default=None)
     pc = safe(cboe_put_call_latest, default=None)
@@ -69,8 +81,34 @@ def build() -> dict:
         "housing": {
             "case_shiller_yoy": cs_yoy[-1][1] if cs_yoy else None,
             "mortgage_30y": mortgage[-1][1] if mortgage else None,
+            "permits": permits[-1][1] if permits else None,           # NEW
             "starts_series": trim(starts, 60),
+            "permits_series": trim(permits, 60),                       # NEW
             "series_mortgage": trim(mortgage, 60),
+        },
+        "ma": {                                                         # NEW
+            "ma50":  ma50_series[-1][1] if ma50_series else None,
+            "ma200": ma200_series[-1][1] if ma200_series else None,
+            "spx_daily": trim(spx_daily, 24 * 21),  # ~2yr daily
+            "ma50_series":  trim(ma50_series, 24 * 21),
+            "ma200_series": trim(ma200_series, 24 * 21),
+        },
+        "breadth": {                                                    # NEW
+            # NYSE A/D line — proxy for "% above MA". Above 0 means more
+            # advancers than decliners on a 50-day rolling basis.
+            "nyad_last": nyad[-1][1] if nyad else None,
+            # Pct of last 50 days where line is rising = breadth health proxy
+            "pct_above_50dma": (
+                round(sum(1 for i in range(1, min(50, len(nyad)))
+                           if nyad[-i][1] > nyad[-i-1][1]) / 50 * 100)
+                if len(nyad) >= 50 else None
+            ),
+            # Pct of last 200 days rising
+            "pct_above_200dma": (
+                round(sum(1 for i in range(1, min(200, len(nyad)))
+                           if nyad[-i][1] > nyad[-i-1][1]) / 200 * 100)
+                if len(nyad) >= 200 else None
+            ),
         },
         "technicals": {
             "fear_greed": fg.get("score") if fg else None,

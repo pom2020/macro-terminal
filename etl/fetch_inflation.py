@@ -10,6 +10,8 @@ def build() -> dict:
     cpi = fred("CPIAUCSL") or []
     core = fred("CPILFESL") or []
     ppi = fred("PPIACO") or []
+    pce = fred("PCEPI") or []           # PCE price index (Fed's preferred)
+    pce_core = fred("PCEPILFE") or []   # Core PCE
     sticky = fred("STICKCPIM157SFRBATL") or []
     # Atlanta Fed Flexible CPI 12-month % change. Try the canonical ID first,
     # fall back to alternates if it's been retired.
@@ -20,6 +22,11 @@ def build() -> dict:
     cpi_yoy = yoy_pct(cpi)
     core_yoy = yoy_pct(core)
     ppi_yoy = yoy_pct(ppi)
+    pce_yoy = yoy_pct(pce)
+    pce_core_yoy = yoy_pct(pce_core)
+    cpi_mom = mom_pct(cpi)
+    core_mom = mom_pct(core)
+    ppi_mom = mom_pct(ppi)
 
     # Supercore (services ex shelter) — Atlanta Fed publishes via FRED
     supercore_3m = trim(mom_pct(fred("CUSR0000SASLE") or []), 3)
@@ -43,15 +50,23 @@ def build() -> dict:
         },
         "cpi": {
             "headline": cpi_yoy[-1][1] if cpi_yoy else None,
+            "headline_mom": cpi_mom[-1][1] if cpi_mom else None,
             "core": core_yoy[-1][1] if core_yoy else None,
+            "core_mom": core_mom[-1][1] if core_mom else None,
             "supercore_3m": (round(supercore_3m_avg * 12, 2)
                              if supercore_3m_avg is not None else None),
             "sticky": sticky[-1][1] if sticky else None,
             "series": trim(cpi_yoy, 60),
+            "core_series": trim(core_yoy, 60),  # NEW: core CPI YoY series
             "labels": [d for d, _ in trim(cpi_yoy, 60)],
+        },
+        "pce": {
+            "headline": pce_yoy[-1][1] if pce_yoy else None,
+            "core": pce_core_yoy[-1][1] if pce_core_yoy else None,
         },
         "ppi": {
             "yoy": ppi_yoy[-1][1] if ppi_yoy else None,
+            "mom": ppi_mom[-1][1] if ppi_mom else None,
             "series": trim(ppi_yoy, 60),
         },
         "deflator": {

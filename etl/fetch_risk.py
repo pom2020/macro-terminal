@@ -51,7 +51,9 @@ def build() -> dict:
     stlfsi = fred("STLFSI4") or []
     nfci = fred("NFCI") or []
     kcfsi = fred("KCFSI") or []        # Kansas City Financial Stress Index
-    ofrfsi = fred("OFRSILVR") or []    # OFR FSI alt; if empty, use STLFSI proxy
+    ofrfsi = fred("OFRSILVR") or []    # OFR FSI alt
+    sahm = fred("SAHMREALTIME") or []  # NEW: Sahm Rule recession indicator
+    gdpnow = fred("GDPNOW") or []      # NEW: Atlanta Fed GDP-Now nowcast
 
     gpr = _gpr_index()
     flashpoint_articles = safe(
@@ -87,7 +89,11 @@ def build() -> dict:
             ),
         },
         "recession_prob": {
-            "ny_fed": rec[-1][1] if rec else None,
+            "ny_fed":   rec[-1][1] if rec else None,
+            "sahm":     sahm[-1][1] if sahm else None,         # NEW
+            "gdp_now":  gdpnow[-1][1] if gdpnow else None,     # NEW
+            "gdp_now_trend": (gdpnow[-1][1] - gdpnow[-2][1])    # NEW
+                                if len(gdpnow) > 1 else None,
             "series": trim(rec, 60),
         },
         "stress": {

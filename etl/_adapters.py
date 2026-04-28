@@ -138,6 +138,54 @@ def shape_growth(raw: dict, seed: dict) -> dict:
         },
     }
 
+    # GDP nominal series array
+    nom_series = (raw.get("gdp", {}) or {}).get("nominal_series") or []
+    if nom_series:
+        _, nom_vals = _split_series(nom_series, 12, _fmt_quarter_label)
+        if nom_vals and "series" in out["gdp"]:
+            out["gdp"]["series"]["nominal"] = nom_vals
+
+    # Components contribution waterfall (PCE/GFI/Gov/NetExp)
+    contrib = (raw.get("gdp", {}) or {}).get("contrib") or {}
+    if contrib and any(contrib.values()):
+        out["components"] = dict(seed.get("components", {}))
+        labels = ["Consumption", "Investment", "Government", "Net Exports"]
+        keys = ["pce", "gpdi", "gov", "net_exp"]
+        out["components"]["labels"] = labels
+        out["components"]["contrib"] = [round(contrib.get(k, 0) or 0, 2) for k in keys]
+        # Share roughly: PCE ~68%, GFI ~18%, Gov ~17%, NetExp ~-3%
+        # Compute share from contributions (rough; preserve seed if zero)
+        total_abs = sum(abs(v or 0) for v in contrib.values()) or 1
+        out["components"]["share"] = [
+            round(abs(contrib.get(k, 0) or 0) / total_abs * 100, 1) for k in keys
+        ]
+
+    # PMI table — overlay US value with Phila Fed Business Activity proxy
+    pmi_raw = raw.get("pmi") or {}
+    if pmi_raw and pmi_raw.get("phil_business") is not None:
+        out["pmi"] = {
+            "manuf":  dict(seed.get("pmi", {}).get("manuf", {})),
+            "services": dict(seed.get("pmi", {}).get("services", {})),
+            "manuf_series":  list(seed.get("pmi", {}).get("manuf_series", [])),
+            "serv_series":   list(seed.get("pmi", {}).get("serv_series", [])),
+            "labels":        list(seed.get("pmi", {}).get("labels", [])),
+        }
+        # Phila + NY are Mfg-side regional Fed surveys; average → US Mfg proxy
+        proxies = [v for v in (pmi_raw.get("phil_business"),
+                                pmi_raw.get("ny_empire")) if v is not None]
+        if proxies:
+            out["pmi"]["manuf"]["US"] = round(sum(proxies) / len(proxies), 1)
+
+    # LEI tile from Phila Fed proxy
+    lei_raw = raw.get("lei") or {}
+    if lei_raw and lei_raw.get("val") is not None:
+        out["lei"] = dict(seed.get("lei", {}))
+        out["lei"]["val"] = round(lei_raw["val"], 2)
+        out["lei"]["consec_neg_months"] = lei_raw.get("consec_neg_months", 0)
+        s = lei_raw.get("series") or []
+        if s:
+            out["lei"]["series"] = [round(v, 2) for _, v in s]
+
     # IP — last value + 24-month series
     ip_raw = raw.get("ip", {}) or {}
     ip_series = ip_raw.get("series") or []
@@ -182,14 +230,20 @@ def shape_inflation(raw: dict, seed: dict) -> dict:
     cpi_series_raw = cpi_r.get("series") or []
     labels, headline_arr = _split_series(cpi_series_raw, 36, _fmt_month_label)
 
+    # Build live core series array if available
+    core_series_raw = cpi_r.get("core_series") or []
+    _, core_arr = _split_series(core_series_raw, 36, _fmt_month_label)
+
     out["cpi"] = {
         "headline": {
             "yoy":      cpi_r.get("headline") if cpi_r.get("headline") is not None
                           else _safe(seed, "cpi", "headline", "yoy"),
-            "mom":      _safe(seed, "cpi", "headline", "mom"),
+            "mom":      cpi_r.get("headline_mom") if cpi_r.get("headline_mom") is not None
+                          else _safe(seed, "cpi", "headline", "mom"),
             "core":     cpi_r.get("core") if cpi_r.get("core") is not None
                           else _safe(seed, "cpi", "headline", "core"),
-            "core_mom": _safe(seed, "cpi", "headline", "core_mom"),
+            "core_mom": cpi_r.get("core_mom") if cpi_r.get("core_mom") is not None
+                          else _safe(seed, "cpi", "headline", "core_mom"),
         },
         "supercore_3m": cpi_r.get("supercore_3m") or _safe(seed, "cpi", "supercore_3m"),
         "sticky":       cpi_r.get("sticky") or _safe(seed, "cpi", "sticky"),
@@ -197,7 +251,7 @@ def shape_inflation(raw: dict, seed: dict) -> dict:
         "series": {
             "labels":   labels   if labels   else _safe(seed, "cpi", "series", "labels"),
             "headline": headline_arr if headline_arr else _safe(seed, "cpi", "series", "headline"),
-            "core":     _safe(seed, "cpi", "series", "core"),  # not in raw
+            "core":     core_arr if core_arr else _safe(seed, "cpi", "series", "core"),
         },
     }
 
@@ -205,6 +259,8 @@ def shape_inflation(raw: dict, seed: dict) -> dict:
     if ppi_r.get("yoy") is not None:
         out["ppi"] = dict(seed.get("ppi", {}))
         out["ppi"]["yoy"] = ppi_r["yoy"]
+        if ppi_r.get("mom") is not None:
+            out["ppi"]["mom"] = ppi_r["mom"]
         ppi_series = ppi_r.get("series") or []
         if ppi_series:
             out["ppi"]["series"] = [round(v, 2) for _, v in ppi_series[-24:]]
@@ -306,22 +362,32 @@ def shape_labor(raw: dict, seed: dict) -> dict:
         out["nfp"]["series"] = [int(v) for v in nfp_arr]
         out["nfp"]["labels"] = nfp_labels
 
-    # JOLTS
-    if jolts.get("openings") is not None:
+    # JOLTS — openings + hires + quits + ratio
+    if jolts.get("openings") is not None or jolts.get("hires") is not None:
         out["jolts"] = dict(seed.get("jolts", {}))
-        # FRED JTSJOL is in thousands; the seed shows millions (e.g. 7.42)
-        out["jolts"]["openings"] = round((jolts["openings"] or 0) / 1000, 2)
+        if jolts.get("openings") is not None:
+            out["jolts"]["openings"] = round((jolts["openings"] or 0) / 1000, 2)
+        if jolts.get("hires") is not None:
+            out["jolts"]["hires"] = round(jolts["hires"] / 1000, 2)
+        if jolts.get("quits") is not None:
+            out["jolts"]["quits"] = round(jolts["quits"] / 1000, 2)
+        if jolts.get("ratio") is not None:
+            out["jolts"]["ratio"] = round(jolts["ratio"], 2)
         op_series = jolts.get("openings_series") or []
         if op_series:
             out["jolts"]["openings_series"] = [round(v / 1000, 2) for _, v in op_series[-24:]]
 
-    # Wages
+    # Wages — AHE YoY + AHE MoM + ECI
     ahe = wages.get("ahe_yoy")
     wage_series = wages.get("series") or []
     if wage_series:
         labels_w, wage_arr = _split_series(wage_series, 36)
         out["wages"] = dict(seed.get("wages", {}))
         out["wages"]["ahe_yoy"] = ahe if ahe is not None else out["wages"].get("ahe_yoy")
+        if wages.get("ahe_mom") is not None:
+            out["wages"]["ahe_mom"] = round(wages["ahe_mom"], 2)
+        if wages.get("eci_yoy") is not None:
+            out["wages"]["eci_yoy"] = round(wages["eci_yoy"], 2)
         out["wages"]["series"] = wage_arr
         out["wages"]["labels"] = labels_w
 
@@ -376,7 +442,7 @@ def shape_monetary(raw: dict, seed: dict) -> dict:
                          "rate": live_rate if live_rate is not None else entry.get("rate")})
     out["policy_rates"] = new_pol
 
-    # 2s10s series + spreads
+    # 2s10s series + 3m10s + 5s30s spreads
     sp_2s10s = spreads.get("series_2s10s") or curve.get("series_2s10s") or []
     if sp_2s10s:
         labels, vals = _split_series(sp_2s10s, 24)
@@ -385,6 +451,13 @@ def shape_monetary(raw: dict, seed: dict) -> dict:
         out["spreads"]["series_2s10s"] = [int(round(v * 100)) for v in vals]
         out["spreads"]["labels"] = labels
         out["spreads"]["2s10s"] = int(round(vals[-1] * 100))
+    # Wire 3m10s and 5s30s if we have them
+    if spreads.get("t10y3m_bp") is not None:
+        if "spreads" not in out: out["spreads"] = dict(seed.get("spreads", {}))
+        out["spreads"]["3m10s"] = int(round(spreads["t10y3m_bp"]))
+    if spreads.get("s5s30_bp") is not None:
+        if "spreads" not in out: out["spreads"] = dict(seed.get("spreads", {}))
+        out["spreads"]["5s30s"] = int(round(spreads["s5s30_bp"]))
 
     # Curve — full 10-tenor snapshot with current / 3-mo / 1-y rows
     tenor_snaps = curve.get("tenors") or {}
@@ -450,11 +523,16 @@ def shape_monetary(raw: dict, seed: dict) -> dict:
             out["fci"]["series"] = [round(v, 2) for v in vals_f]
             out["fci"]["labels"] = labels_f
 
-    # Money — keep seed; m1/m2 yoy where available
+    # Money — m1/m2 yoy + M2 series
     if money.get("m1_yoy") is not None or money.get("m2_yoy") is not None:
         out["money"] = dict(seed.get("money", {}))
-        if money.get("m1_yoy") is not None: out["money"]["m1_yoy"] = money["m1_yoy"]
-        if money.get("m2_yoy") is not None: out["money"]["m2_yoy"] = money["m2_yoy"]
+        if money.get("m1_yoy") is not None: out["money"]["m1_yoy"] = round(money["m1_yoy"], 1)
+        if money.get("m2_yoy") is not None: out["money"]["m2_yoy"] = round(money["m2_yoy"], 1)
+        m2s = money.get("m2_series") or []
+        if m2s:
+            labels_m, vals_m = _split_series(m2s, 24)
+            out["money"]["m2_series"] = [round(v, 1) for v in vals_m]
+            out["money"]["labels"] = labels_m
 
     # Narrative
     s2s10 = out.get("spreads", {}).get("2s10s") or 0
@@ -483,6 +561,8 @@ def shape_external(raw: dict, seed: dict) -> dict:
     if trade.get("balance") is not None:
         out["trade"] = dict(seed.get("trade", {}))
         out["trade"]["balance"] = round((trade["balance"] or 0) / 1000, 1)
+        if trade.get("balance_prev") is not None:
+            out["trade"]["prev"] = round(trade["balance_prev"] / 1000, 1)
         out["trade"]["exports"] = round((trade.get("exports") or 0) / 1000, 1)
         out["trade"]["imports"] = round((trade.get("imports") or 0) / 1000, 1)
         bs = trade.get("balance_series") or []
@@ -498,12 +578,39 @@ def shape_external(raw: dict, seed: dict) -> dict:
         out["current_account"] = dict(seed.get("current_account", {}))
         out["current_account"]["pct_gdp"] = round(ca["val"] / 1000 / 280, 2)  # rough %GDP
 
-    # FX
+    # FX reserves table (IMF COFER)
+    res_live = raw.get("reserves") or []
+    if res_live:
+        # Overlay live values onto seed entries by country name
+        seed_reserves = seed.get("reserves", []) or []
+        live_by_country = {r.get("country"): r for r in res_live}
+        new_reserves = []
+        for sr in seed_reserves:
+            live = live_by_country.get(sr.get("country"))
+            if live and live.get("val") is not None:
+                new_reserves.append({**sr, "val": live["val"]})
+            else:
+                new_reserves.append(sr)
+        out["reserves"] = new_reserves
+
+    # FX — DXY + cross pairs + DXY YTD
     if fx.get("dxy") is not None:
         out["fx"] = dict(seed.get("fx", {}))
         out["fx"]["dxy"] = round(fx["dxy"], 2)
+        if fx.get("dxy_ytd") is not None:
+            out["fx"]["dxy_ytd"] = fx["dxy_ytd"]
         # Cross pairs — overlay where shape matches
-        live_pairs = {p.get("pair"): p.get("rate") for p in fx.get("pairs", []) or []}
+        # Frankfurter returns USD/<CCY> as USD->CCY rate. The seed's "EUR/USD"
+        # convention reciprocates; handle both directions.
+        live_pairs = {}
+        for p in fx.get("pairs", []) or []:
+            pair = p.get("pair", "")
+            rate = p.get("rate", 0)
+            live_pairs[pair] = rate
+            # Also store reciprocal
+            if "/" in pair and rate:
+                base, quote = pair.split("/")
+                live_pairs[f"{quote}/{base}"] = round(1 / rate, 4)
         seed_pairs = seed.get("fx", {}).get("pairs", [])
         out["fx"]["pairs"] = [
             {**sp, "val": round(live_pairs.get(sp.get("pair"), sp.get("val", 0)), 4)}
@@ -540,10 +647,10 @@ def shape_markets(raw: dict, seed: dict) -> dict:
         idx = sec.get("idx", "")
         live = eq_live.get(idx)
         if live and live.get("price") is not None:
-            new_eq.append({**sec,
-                            "val": round(live["price"], 2),
-                            # YTD/YoY would need a year-ago anchor; keep seed
-                            })
+            merged = {**sec, "val": round(live["price"], 2)}
+            if live.get("ytd") is not None: merged["ytd"] = live["ytd"]
+            if live.get("yoy") is not None: merged["yoy"] = live["yoy"]
+            new_eq.append(merged)
         else:
             new_eq.append(sec)
     out["equity"] = new_eq
@@ -551,12 +658,23 @@ def shape_markets(raw: dict, seed: dict) -> dict:
     # SPX series — last 24 monthly closes from FRED SP500
     spx_series = raw.get("spx_series") or []
     if isinstance(spx_series, list) and spx_series:
-        # spx_series is [(date, close)]; produce labels + price + ma50 + ma200
         labels, prices = _split_series(spx_series, 24)
         out["spx_series"] = dict(seed.get("spx_series", {}))
         out["spx_series"]["labels"] = labels
         out["spx_series"]["price"] = [int(round(p)) for p in prices]
-        # ma50 / ma200 — keep seed (would need full daily history to compute)
+
+    # Compute MA50 / MA200 series from FRED daily SP500
+    ma_raw = raw.get("ma") or {}
+    ma50_series  = ma_raw.get("ma50_series")  or []
+    ma200_series = ma_raw.get("ma200_series") or []
+    if ma50_series and ma200_series:
+        # Sample to 24 points to align with the spx_series chart
+        step50  = max(1, len(ma50_series)  // 24)
+        step200 = max(1, len(ma200_series) // 24)
+        ma50_sampled  = [int(round(v)) for _, v in ma50_series[::step50][-24:]]
+        ma200_sampled = [int(round(v)) for _, v in ma200_series[::step200][-24:]]
+        out["spx_series"]["ma50"]  = ma50_sampled
+        out["spx_series"]["ma200"] = ma200_sampled
 
     # Credit OAS
     cr = raw.get("credit", {}) or {}
@@ -589,6 +707,8 @@ def shape_markets(raw: dict, seed: dict) -> dict:
         out["housing"]["case_shiller_yoy"] = round(h["case_shiller_yoy"], 1)
     if h.get("mortgage_30y") is not None:
         out["housing"]["mortgage_30y"] = round(h["mortgage_30y"], 2)
+    if h.get("permits") is not None:
+        out["housing"]["permits"] = int(round(h["permits"]))
     starts_series = h.get("starts_series") or []
     if starts_series:
         labels, vals = _split_series(starts_series, 24)
@@ -599,13 +719,19 @@ def shape_markets(raw: dict, seed: dict) -> dict:
     if mort_series:
         out["housing"]["series_mortgage"] = [round(v, 2) for _, v in mort_series[-24:]]
 
-    # Technicals — Fear & Greed + put/call live, others stay seed
+    # Technicals — Fear & Greed + put/call live, breadth from NYSE A/D
     tech = raw.get("technicals", {}) or {}
+    breadth = raw.get("breadth", {}) or {}
     out["technicals"] = dict(seed.get("technicals", {}))
     if tech.get("fear_greed") is not None:
         out["technicals"]["fear_greed"] = int(tech["fear_greed"])
     if tech.get("put_call") is not None:
         out["technicals"]["put_call"] = round(tech["put_call"], 2)
+    # Breadth (NYSE A/D proxy for S&P 500 breadth)
+    if breadth.get("pct_above_50dma") is not None:
+        out["technicals"]["pct_above_50dma"] = breadth["pct_above_50dma"]
+    if breadth.get("pct_above_200dma") is not None:
+        out["technicals"]["pct_above_200dma"] = breadth["pct_above_200dma"]
 
     # Narrative
     spx = next((e.get("val") for e in out["equity"] if e.get("idx") == "S&P 500"), None)
@@ -691,14 +817,21 @@ def shape_risk(raw: dict, seed: dict) -> dict:
     rec = raw.get("recession_prob", {}) or {}
     stress = raw.get("stress", {}) or {}
 
-    # Recession prob — series goes 0..100 in our raw output
-    if rec.get("ny_fed") is not None:
+    # Recession prob — NY Fed + Sahm Rule + GDP-Now nowcast
+    if rec.get("ny_fed") is not None or rec.get("sahm") is not None:
         out["recession_prob"] = dict(seed.get("recession_prob", {}))
-        nyf = rec["ny_fed"]
+        nyf = rec.get("ny_fed")
         # FRED RECPROUSM156N is 0..1; convert to %
-        if isinstance(nyf, (int, float)) and nyf <= 1:
+        if nyf is not None and isinstance(nyf, (int, float)) and nyf <= 1:
             nyf = round(nyf * 100)
-        out["recession_prob"]["ny_fed"] = int(nyf)
+        if nyf is not None:
+            out["recession_prob"]["ny_fed"] = int(nyf)
+        if rec.get("sahm") is not None:
+            out["recession_prob"]["sahm_rule"] = round(rec["sahm"], 2)
+        if rec.get("gdp_now") is not None:
+            out["recession_prob"]["gdp_now"] = round(rec["gdp_now"], 1)
+        if rec.get("gdp_now_trend") is not None:
+            out["recession_prob"]["gdp_now_trend"] = round(rec["gdp_now_trend"], 1)
         rec_series = rec.get("series") or []
         if rec_series:
             labels, vals = _split_series(rec_series, 24)

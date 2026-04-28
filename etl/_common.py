@@ -146,6 +146,56 @@ def trim(series: list[tuple[str, float]], n: int) -> list[tuple[str, float]]:
     return series[-n:] if len(series) > n else series
 
 
+def ytd_pct(series: list[tuple[str, float]]) -> float | None:
+    """Year-to-date % change. Anchors at the last observation in the previous
+    calendar year. Returns None if anchor not found."""
+    if not series:
+        return None
+    last_date, last_val = series[-1]
+    try:
+        last_year = int(last_date[:4])
+    except Exception:
+        return None
+    anchor_year = last_year - 1
+    # Find the last value in the prior calendar year (year-end close)
+    anchor = None
+    for d, v in series:
+        if d.startswith(str(anchor_year)):
+            anchor = v
+    if anchor is None or anchor == 0:
+        return None
+    return round((last_val / anchor - 1) * 100, 2)
+
+
+def yoy_change(series: list[tuple[str, float]]) -> float | None:
+    """Year-over-year % change of the last observation vs. ~252 trading days
+    earlier (or 12 months for monthly series)."""
+    if not series:
+        return None
+    last = series[-1][1]
+    # Try 252 (daily) first, then 12 (monthly), then 4 (quarterly)
+    for offset in (252, 12, 4):
+        if len(series) > offset:
+            prev = series[-1 - offset][1]
+            if prev:
+                return round((last / prev - 1) * 100, 2)
+    return None
+
+
+def moving_avg(series: list[tuple[str, float]], window: int
+                ) -> list[tuple[str, float]]:
+    """Simple moving average. Returns [(date, ma_value), ...] for points
+    where a full window is available."""
+    if len(series) < window:
+        return []
+    out = []
+    for i in range(window - 1, len(series)):
+        chunk = series[i - window + 1: i + 1]
+        avg = sum(v for _, v in chunk) / window
+        out.append((series[i][0], round(avg, 2)))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Stooq — daily OHLC CSV, no key
 # ---------------------------------------------------------------------------
@@ -278,6 +328,91 @@ def gdelt_tone(query: str, *, timespan: str = "24h") -> float | None:
     total = sum(row.get("count", 0) * row.get("bin", 0) for row in rows)
     n = sum(row.get("count", 0) for row in rows)
     return round(total / n, 2) if n else None
+
+
+# ---------------------------------------------------------------------------
+# Google News RSS — free, no key, returns headline + summary + link
+# ---------------------------------------------------------------------------
+def google_news_rss(query: str, *, lang: str = "en", max_items: int = 10
+                     ) -> list[dict]:
+    """Fetch Google News RSS for a query string. Returns simple dicts."""
+    try:
+        r = _retry_get(
+            "https://news.google.com/rss/search",
+            params={"q": query, "hl": lang, "gl": "US", "ceid": "US:en"},
+            timeout=10, max_retries=1,
+        )
+        text = r.text
+    except Exception as e:
+        print(f"  !! google_news_rss({query[:30]!r}) failed: {e}")
+        return []
+    # Lightweight RSS parser — no feedparser dependency
+    import re as _re
+    items: list[dict] = []
+    for m in _re.finditer(r"<item>(.*?)</item>", text, flags=_re.S):
+        block = m.group(1)
+        def field(name):
+            mm = _re.search(rf"<{name}[^>]*>(.*?)</{name}>", block, flags=_re.S)
+            if not mm: return ""
+            v = mm.group(1)
+            # CDATA strip
+            cd = _re.search(r"<!\[CDATA\[(.*?)\]\]>", v, flags=_re.S)
+            if cd: v = cd.group(1)
+            # Strip leftover HTML tags from description
+            v = _re.sub(r"<[^>]+>", " ", v).strip()
+            return v
+        items.append({
+            "title":   field("title"),
+            "link":    field("link"),
+            "pub":     field("pubDate"),
+            "summary": field("description"),
+            "source":  field("source"),
+        })
+        if len(items) >= max_items:
+            break
+    return items
+
+
+# ---------------------------------------------------------------------------
+# IMF DataMapper / COFER — global FX reserves
+# ---------------------------------------------------------------------------
+def imf_cofer_total_reserves(country_code: str) -> float | None:
+    """IMF World Economic Outlook reserves — quarterly, in USD billions.
+    country_code: ISO-3 (USA, CHN, JPN, GBR, DEU, ...).
+    """
+    try:
+        r = _retry_get(
+            f"https://www.imf.org/external/datamapper/api/v1/RES/{country_code}",
+            timeout=12,
+        )
+        j = r.json().get("values", {}).get("RES", {}).get(country_code, {})
+        if not j:
+            return None
+        # Pick the most recent year
+        year = max(j.keys())
+        return float(j[year])
+    except Exception as e:
+        print(f"  !! imf_cofer({country_code}) failed: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# SIFMA bond-issuance CSV — free monthly download
+# ---------------------------------------------------------------------------
+def sifma_bond_issuance() -> dict | None:
+    """SIFMA publishes free monthly issuance CSVs. URL pattern is stable but
+    occasionally rotates. Returns last-12-month totals for HY and IG."""
+    try:
+        r = _retry_get(
+            "https://www.sifma.org/wp-content/uploads/2017/06/"
+            "us-corporate-bond-issuance-sifma.xlsx",
+            timeout=15,
+        )
+        # Parse a thin slice without openpyxl — the workbook may not be
+        # readable as plain bytes, so we wrap and gracefully fall back.
+        return None  # Placeholder — disabled until URL is verified
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------

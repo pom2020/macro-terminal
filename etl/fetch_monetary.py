@@ -22,6 +22,16 @@ def build() -> dict:
     dgs10 = curve_tenors["10Y"]
     dgs2 = curve_tenors["2Y"]
     t10y2y = fred("T10Y2Y") or []
+    t10y3m = fred("T10Y3M") or []      # 3m10s spread (NEW)
+    # 5s30s spread — compute from DGS5 and DGS30 we already have
+    dgs5 = curve_tenors["5Y"]
+    dgs30 = curve_tenors["30Y"]
+    s5s30 = []
+    if dgs5 and dgs30:
+        d5_map = dict(dgs5)
+        for d, v30 in dgs30:
+            if d in d5_map:
+                s5s30.append((d, round(v30 - d5_map[d], 4)))
     ig = fred("BAMLC0A0CM") or []
     hy = fred("BAMLH0A0HYM2") or []
     m1 = fred("M1SL") or []
@@ -70,6 +80,8 @@ def build() -> dict:
         "spreads": {
             "ig_oas": ig[-1][1] if ig else None,
             "hy_oas": hy[-1][1] if hy else None,
+            "t10y3m_bp": round(t10y3m[-1][1] * 100, 1) if t10y3m else None,  # NEW
+            "s5s30_bp":  round(s5s30[-1][1] * 100, 1) if s5s30 else None,    # NEW
             "series_ig": trim(ig, 60),
             "series_hy": trim(hy, 60),
         },
@@ -81,7 +93,7 @@ def build() -> dict:
         "money": {
             "m1_yoy": yoy_pct(m1)[-1][1] if yoy_pct(m1) else None,
             "m2_yoy": yoy_pct(m2)[-1][1] if yoy_pct(m2) else None,
-            "m2_series": trim(m2, 60),
+            "m2_series": trim(yoy_pct(m2) or [], 24),  # NEW: M2 YoY series
         },
         "credit": {
             "c_and_i":    yoy_pct(busloans)[-1][1] if yoy_pct(busloans) else None,
