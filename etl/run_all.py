@@ -49,6 +49,11 @@ def main() -> int:
         ov = fetch_overview.build()
         write_json("data/overview.json", ov)
         bundle["overview"] = ov
+        # The React components read window.MACRO.ticker / .healthScore / .regions
+        # directly at the top level (not under overview), so mirror them here.
+        bundle["regions"]     = ov.get("regions")
+        bundle["healthScore"] = ov.get("healthScore")
+        bundle["ticker"]      = ov.get("ticker", [])
     except Exception as e:
         print(f"  !! overview FAILED: {e}")
         failures.append("overview")
