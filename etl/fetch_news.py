@@ -20,17 +20,35 @@ from etl._common import (utcnow_iso, write_json, safe, gdelt_articles,
                           fred_release_dates)
 
 
-# Topic queries (each maps to a section / region tag)
+# Topic queries (each maps to a section / region tag).
+# Every query is constrained to English-language sources via sourcelang:eng,
+# which is GDELT's built-in language filter. We also post-filter on the
+# article-level "language" field below to catch any that slip through.
+def _en(q: str) -> str:
+    return f"{q} sourcelang:eng"
+
 TOPIC_QUERIES = [
-    ("FED",     "US", "(federal reserve OR Powell OR FOMC OR \"interest rate\")"),
-    ("ECB",     "EU", "(ECB OR \"european central bank\" OR Lagarde)"),
-    ("DATA",    "US", "(\"retail sales\" OR \"jobs report\" OR CPI OR PCE OR GDP)"),
-    ("PBoC",    "CN", "(China OR PBoC OR \"Bank of China\")"),
-    ("BoJ",     "JP", "(\"Bank of Japan\" OR BOJ OR Ueda OR yen)"),
-    ("OIL",     "US", "(\"oil prices\" OR brent OR OPEC)"),
-    ("CREDIT",  "US", "(credit OR lending OR bond yields OR spreads)"),
-    ("FISCAL",  "US", "(\"federal deficit\" OR \"national debt\" OR CBO)"),
+    ("FED",     "US", _en("(federal reserve OR Powell OR FOMC OR \"interest rate\")")),
+    ("ECB",     "EU", _en("(ECB OR \"european central bank\" OR Lagarde)")),
+    ("DATA",    "US", _en("(\"retail sales\" OR \"jobs report\" OR CPI OR PCE OR GDP)")),
+    ("PBoC",    "CN", _en("(China OR PBoC OR \"Bank of China\")")),
+    ("BoJ",     "JP", _en("(\"Bank of Japan\" OR BOJ OR Ueda OR yen)")),
+    ("OIL",     "US", _en("(\"oil prices\" OR brent OR OPEC)")),
+    ("CREDIT",  "US", _en("(credit OR lending OR \"bond yields\" OR spreads)")),
+    ("FISCAL",  "US", _en("(\"federal deficit\" OR \"national debt\" OR CBO)")),
 ]
+
+# GDELT returns the language as an ISO 639-2 code (3-letter) OR sometimes
+# the English name. Accept both forms here.
+ENGLISH_LANG_CODES = {"english", "eng", "en"}
+
+
+def _is_english(article: dict) -> bool:
+    """Defensive post-filter — drop anything that GDELT didn't tag as English."""
+    lang = (article.get("language") or "").strip().lower()
+    if not lang:
+        return True   # no language tag → assume the sourcelang filter caught it
+    return lang in ENGLISH_LANG_CODES
 
 # Critical-impact tags get the red treatment in the UI
 CRITICAL_TAGS = {"FED", "ECB", "PBoC", "BoJ"}
@@ -69,8 +87,11 @@ def _format_seen_at(seendate: str | None) -> tuple[str, str]:
 def _fetch_headlines() -> list[dict]:
     items: list[dict] = []
     for tag, region, query in TOPIC_QUERIES:
-        articles = safe(gdelt_articles, query, max_records=4,
+        # Pull a few extra per topic since the post-filter may drop some
+        articles = safe(gdelt_articles, query, max_records=6,
                          timespan="48h", default=[]) or []
+        # Defensive: drop any non-English articles that slipped past sourcelang
+        articles = [a for a in articles if _is_english(a)]
         for a in articles:
             time_str, date_str = _format_seen_at(a.get("seendate"))
             tone = a.get("tone")
