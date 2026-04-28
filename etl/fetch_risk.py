@@ -50,6 +50,8 @@ def build() -> dict:
     rec = _ny_fed_recession()
     stlfsi = fred("STLFSI4") or []
     nfci = fred("NFCI") or []
+    kcfsi = fred("KCFSI") or []        # Kansas City Financial Stress Index
+    ofrfsi = fred("OFRSILVR") or []    # OFR FSI alt; if empty, use STLFSI proxy
 
     gpr = _gpr_index()
     flashpoint_articles = safe(
@@ -90,7 +92,9 @@ def build() -> dict:
         },
         "stress": {
             "stlfsi": stlfsi[-1][1] if stlfsi else None,
-            "nfci": nfci[-1][1] if nfci else None,
+            "nfci":   nfci[-1][1] if nfci else None,
+            "kcfsi":  kcfsi[-1][1] if kcfsi else None,
+            "ofr":    ofrfsi[-1][1] if ofrfsi else None,
             "series_stlfsi": trim(stlfsi, 60),
         },
         "geopolitical": {

@@ -6,8 +6,21 @@ from etl._common import (fred, fred_latest, yoy_pct, trim, utcnow_iso,
 
 
 def build() -> dict:
-    dgs10 = fred("DGS10") or []
-    dgs2 = fred("DGS2") or []
+    # Full yield curve — 10 standard tenors
+    curve_tenors = {
+        "3M":  fred("DGS3MO") or [],
+        "6M":  fred("DGS6MO") or [],
+        "1Y":  fred("DGS1") or [],
+        "2Y":  fred("DGS2") or [],
+        "3Y":  fred("DGS3") or [],
+        "5Y":  fred("DGS5") or [],
+        "7Y":  fred("DGS7") or [],
+        "10Y": fred("DGS10") or [],
+        "20Y": fred("DGS20") or [],
+        "30Y": fred("DGS30") or [],
+    }
+    dgs10 = curve_tenors["10Y"]
+    dgs2 = curve_tenors["2Y"]
     t10y2y = fred("T10Y2Y") or []
     ig = fred("BAMLC0A0CM") or []
     hy = fred("BAMLH0A0HYM2") or []
@@ -15,7 +28,10 @@ def build() -> dict:
     m2 = fred("M2SL") or []
     stlfsi = fred("STLFSI4") or []
     nfci = fred("NFCI") or []
-    busloans = fred("BUSLOANS") or []
+    # Credit sub-section series
+    busloans = fred("BUSLOANS") or []     # C&I loans, all commercial banks
+    consumer = fred("TOTALSL") or []      # Total consumer credit outstanding
+    mortgage_out = fred("REALLN") or []   # Real estate loans outstanding
 
     payload = {
         "asOf": utcnow_iso(),
@@ -41,6 +57,15 @@ def build() -> dict:
             "current_2s10s_bp": round(t10y2y[-1][1] * 100, 1) if t10y2y else None,
             "current_10y": dgs10[-1][1] if dgs10 else None,
             "current_2y": dgs2[-1][1] if dgs2 else None,
+            # Full curve: each tenor with current, 3-mo-ago, 1y-ago snapshots
+            "tenors": {
+                tenor: {
+                    "current":     series[-1][1] if series else None,
+                    "three_m_ago": series[-65][1] if len(series) >= 65 else None,
+                    "one_y_ago":   series[-252][1] if len(series) >= 252 else None,
+                }
+                for tenor, series in curve_tenors.items()
+            },
         },
         "spreads": {
             "ig_oas": ig[-1][1] if ig else None,
@@ -59,8 +84,9 @@ def build() -> dict:
             "m2_series": trim(m2, 60),
         },
         "credit": {
-            "c_and_i": busloans[-1][1] if busloans else None,
-            "c_and_i_yoy": yoy_pct(busloans)[-1][1] if yoy_pct(busloans) else None,
+            "c_and_i":    yoy_pct(busloans)[-1][1] if yoy_pct(busloans) else None,
+            "consumer":   yoy_pct(consumer)[-1][1] if yoy_pct(consumer) else None,
+            "mortgage":   yoy_pct(mortgage_out)[-1][1] if yoy_pct(mortgage_out) else None,
         },
         "fci": {
             "stlfsi": stlfsi[-1][1] if stlfsi else None,

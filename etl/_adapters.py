@@ -386,19 +386,59 @@ def shape_monetary(raw: dict, seed: dict) -> dict:
         out["spreads"]["labels"] = labels
         out["spreads"]["2s10s"] = int(round(vals[-1] * 100))
 
-    # Curve — current 10y as last value of series_10y; seed labels stay
-    s10 = curve.get("series_10y") or []
-    if s10:
-        # build a 10-tenor curve from the data we have
-        tenors_seed = seed.get("curve", {}).get("labels", [])
-        # Replace the 10Y entry only, keep rest from seed
-        cur = list(seed.get("curve", {}).get("current", []))
-        if "10Y" in tenors_seed:
-            idx = tenors_seed.index("10Y")
-            if idx < len(cur):
-                cur[idx] = round(s10[-1][1], 2)
-        out["curve"] = dict(seed.get("curve", {}))
-        out["curve"]["current"] = cur
+    # Curve — full 10-tenor snapshot with current / 3-mo / 1-y rows
+    tenor_snaps = curve.get("tenors") or {}
+    if tenor_snaps:
+        seed_curve = seed.get("curve", {}) or {}
+        tenors_seed = seed_curve.get("labels", []) or []
+        cur = list(seed_curve.get("current", []))
+        m3  = list(seed_curve.get("three_m_ago", []))
+        y1  = list(seed_curve.get("one_y_ago", []))
+        for i, label in enumerate(tenors_seed):
+            snap = tenor_snaps.get(label)
+            if not snap:
+                continue
+            if snap.get("current") is not None and i < len(cur):
+                cur[i] = round(snap["current"], 2)
+            if snap.get("three_m_ago") is not None and i < len(m3):
+                m3[i] = round(snap["three_m_ago"], 2)
+            if snap.get("one_y_ago") is not None and i < len(y1):
+                y1[i] = round(snap["one_y_ago"], 2)
+        out["curve"] = {**seed_curve,
+                         "current": cur, "three_m_ago": m3, "one_y_ago": y1}
+    else:
+        # Fallback: just the 10Y from series_10y
+        s10 = curve.get("series_10y") or []
+        if s10:
+            seed_curve = seed.get("curve", {}) or {}
+            tenors_seed = seed_curve.get("labels", []) or []
+            cur = list(seed_curve.get("current", []))
+            if "10Y" in tenors_seed:
+                idx = tenors_seed.index("10Y")
+                if idx < len(cur):
+                    cur[idx] = round(s10[-1][1], 2)
+            out["curve"] = {**seed_curve, "current": cur}
+
+    # Real rates — wire all three from raw
+    rr = raw.get("real_rates", {}) or {}
+    if any(rr.get(k) is not None for k in ("tips_5y", "tips_10y", "fed_rrp")):
+        out["real_rates"] = dict(seed.get("real_rates", {}))
+        if rr.get("tips_5y")  is not None: out["real_rates"]["tips_5y"]  = round(rr["tips_5y"], 2)
+        if rr.get("tips_10y") is not None: out["real_rates"]["tips_10y"] = round(rr["tips_10y"], 2)
+        if rr.get("fed_rrp")  is not None: out["real_rates"]["fed_rrp"]  = round(rr["fed_rrp"], 2)
+
+    # Credit sub-section — YoY % changes
+    cr = raw.get("credit", {}) or {}
+    if any(cr.get(k) is not None for k in ("c_and_i", "consumer", "mortgage")):
+        out["credit"] = dict(seed.get("credit", {}))
+        if cr.get("c_and_i")  is not None: out["credit"]["c_and_i"]  = round(cr["c_and_i"], 1)
+        if cr.get("consumer") is not None: out["credit"]["consumer"] = round(cr["consumer"], 1)
+        if cr.get("mortgage") is not None: out["credit"]["mortgage"] = round(cr["mortgage"], 1)
+        # Total = avg of the three (simple)
+        vals = [v for v in (cr.get("c_and_i"), cr.get("consumer"), cr.get("mortgage"))
+                if v is not None]
+        if vals:
+            out["credit"]["total"] = round(sum(vals) / len(vals), 1)
 
     # FCI
     if fci.get("stlfsi") is not None:
@@ -606,6 +646,16 @@ def shape_fiscal(raw: dict, seed: dict) -> dict:
             "debt":    [round(v, 2) for v in debt_arr],
         }
 
+    # Spending breakdown (Treasury Fiscal Data, last 12 months)
+    spending = raw.get("spending", []) or []
+    if spending:
+        out["spending"] = spending
+
+    # Revenue breakdown (Treasury Fiscal Data, last 12 months)
+    revenue = raw.get("revenue", []) or []
+    if revenue:
+        out["revenue"] = revenue
+
     # Global comparison
     glob = raw.get("global", []) or []
     if glob:
@@ -657,12 +707,17 @@ def shape_risk(raw: dict, seed: dict) -> dict:
                 for v in vals]
             out["recession_prob"]["labels"] = labels
 
-    # Stress
-    if stress.get("stlfsi") is not None:
+    # Stress — STLFSI + NFCI + KCFSI + OFR
+    if any(stress.get(k) is not None for k in ("stlfsi", "nfci", "kcfsi", "ofr")):
         out["stress"] = dict(seed.get("stress", {}))
-        out["stress"]["stlfsi"] = round(stress["stlfsi"], 2)
+        if stress.get("stlfsi") is not None:
+            out["stress"]["stlfsi"] = round(stress["stlfsi"], 2)
         if stress.get("nfci") is not None:
             out["stress"]["chicago_nfci"] = round(stress["nfci"], 2)
+        if stress.get("kcfsi") is not None:
+            out["stress"]["kcfsi"] = round(stress["kcfsi"], 2)
+        if stress.get("ofr") is not None:
+            out["stress"]["ofr"] = round(stress["ofr"], 2)
         s_series = stress.get("series_stlfsi") or []
         if s_series:
             labels, vals = _split_series(s_series, 24)

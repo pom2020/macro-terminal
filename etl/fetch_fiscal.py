@@ -6,8 +6,7 @@ from etl._common import (fred, fred_latest, yoy_pct, trim, utcnow_iso,
 
 
 def _treasury_recent_outlays() -> list[dict]:
-    """Treasury Fiscal Data — monthly receipts vs outlays.
-
+    """Treasury Fiscal Data — monthly outlays.
     Endpoint: /v1/accounting/mts/mts_table_5  (free, no key)
     """
     try:
@@ -15,11 +14,96 @@ def _treasury_recent_outlays() -> list[dict]:
             "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/"
             "v1/accounting/mts/mts_table_5",
             params={"fields": "record_date,classification_desc,current_month_net_outly_amt",
-                    "page[size]": 50, "sort": "-record_date"},
+                    "page[size]": 200, "sort": "-record_date"},
         )
         return r.json().get("data", [])
     except Exception:
         return []
+
+
+def _treasury_recent_receipts() -> list[dict]:
+    """Treasury Fiscal Data — monthly receipts (revenue) by source.
+    Endpoint: /v1/accounting/mts/mts_table_4  (free, no key)
+    """
+    try:
+        r = _retry_get(
+            "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/"
+            "v1/accounting/mts/mts_table_4",
+            params={"fields": "record_date,classification_desc,current_month_rcpt_amt",
+                    "page[size]": 200, "sort": "-record_date"},
+        )
+        return r.json().get("data", [])
+    except Exception:
+        return []
+
+
+# Map Treasury function names → seed `cat` labels (for spending) and an
+# ordering hint. Treasury uses long descriptive names; we condense.
+SPENDING_MAP = [
+    ("Social Security",          "Social Security"),
+    ("National Defense",         "Defense"),
+    ("Medicare",                 "Medicare"),
+    ("Health",                   "Health (Medicaid)"),
+    ("Income Security",          "Income Security"),
+    ("Net Interest",             "Net Interest"),
+    ("Veterans",                 "Veterans Benefits"),
+    ("Education",                "Education"),
+    ("Transportation",           "Transportation"),
+]
+
+REVENUE_MAP = [
+    ("Individual Income",        "Individual Income"),
+    ("Social Insurance",         "Payroll (FICA)"),
+    ("Corporation Income",       "Corporate Income"),
+    ("Excise",                   "Excise"),
+    ("Customs",                  "Customs"),
+    ("Estate and Gift",          "Estate & Gift"),
+    ("Miscellaneous",            "Other"),
+]
+
+
+def _aggregate_by_function(rows: list[dict], amount_field: str,
+                            mapping: list[tuple[str, str]]) -> list[dict]:
+    """Take recent monthly rows and group by mapped function. Sum the
+    last 12 months for each. Return [{cat, val, pct}, ...]."""
+    if not rows:
+        return []
+
+    # Find the most recent record_date and take 12 months back
+    dates = sorted({r.get("record_date") for r in rows if r.get("record_date")},
+                    reverse=True)
+    if not dates:
+        return []
+    keep_dates = set(dates[:12])
+
+    totals: dict[str, float] = {label: 0.0 for _, label in mapping}
+    for row in rows:
+        if row.get("record_date") not in keep_dates:
+            continue
+        desc = row.get("classification_desc", "") or ""
+        amt = row.get(amount_field, "0") or "0"
+        try:
+            val = float(amt)
+        except (TypeError, ValueError):
+            continue
+        for needle, label in mapping:
+            if needle.lower() in desc.lower():
+                totals[label] += val
+                break
+
+    grand = sum(totals.values()) or 1.0
+    out = []
+    for _, label in mapping:
+        v = totals[label]
+        if v <= 0:
+            continue
+        out.append({
+            "cat": label,
+            "val": int(round(v / 1_000_000)),    # raw is dollars; show $bn
+            "pct": round(v / grand * 100, 1),
+        })
+    out.sort(key=lambda x: -x["pct"])
+    return out
 
 
 def build() -> dict:
@@ -37,7 +121,12 @@ def build() -> dict:
             global_compare.append({"country": name, "debt_pct_gdp": s[-1][1],
                                    "year": s[-1][0]})
 
-    outlays = _treasury_recent_outlays()
+    outlays_raw = _treasury_recent_outlays()
+    receipts_raw = _treasury_recent_receipts()
+    spending_agg = _aggregate_by_function(
+        outlays_raw, "current_month_net_outly_amt", SPENDING_MAP)
+    revenue_agg = _aggregate_by_function(
+        receipts_raw, "current_month_rcpt_amt", REVENUE_MAP)
 
     payload = {
         "asOf": utcnow_iso(),
@@ -57,8 +146,8 @@ def build() -> dict:
             "deficit_series": trim(deficit, 40),
         },
         "global": global_compare,
-        "spending": outlays[:25],
-        "revenue": [],
+        "spending": spending_agg,
+        "revenue": revenue_agg,
     }
     return payload
 
