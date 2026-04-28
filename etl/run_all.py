@@ -2,6 +2,19 @@
 into a single macro.json that the frontend prefers (one round-trip).
 
 Order matters: overview reads the per-section files.
+
+Architecture note (Apr 28, 2026): the React components in the prototype
+read very specific shapes (e.g. monetary.curve = {labels, current, three_m_ago,
+one_y_ago}, not just a list of [date, value] pairs). My fetch_<section>.py
+modules currently produce a flatter "raw" shape that the components don't
+consume directly. Until each section has a shape adapter, the bundle is
+built by:
+  1. Loading the prototype's seed shape as the base (everything renders).
+  2. Overlaying only the live fields whose shapes already match: top-level
+     ticker, healthScore, regions, asOf, plus anything individual fetchers
+     return as a "patch" dict matching the seed.
+This guarantees the page never breaks; live coverage expands per-section
+as we add adapters.
 """
 from __future__ import annotations
 
@@ -14,6 +27,13 @@ from etl import (fetch_growth, fetch_inflation, fetch_labor, fetch_monetary,
                  fetch_external, fetch_markets, fetch_fiscal, fetch_risk,
                  fetch_news, fetch_overview)
 from etl._common import utcnow_iso, write_json
+
+SEED_PATH = os.path.join(os.path.dirname(__file__), "_seed_macro.json")
+
+
+def load_seed() -> dict:
+    with open(SEED_PATH) as f:
+        return json.load(f)
 
 SECTIONS = [
     ("growth",    fetch_growth.build),
@@ -30,30 +50,34 @@ SECTIONS = [
 
 def main() -> int:
     failures: list[str] = []
-    bundle: dict = {"asOf": utcnow_iso()}
+    # Start from the prototype seed shape so every component renders even
+    # before live shape-adapters are in place.
+    bundle: dict = load_seed()
+    bundle["asOf"] = utcnow_iso()
 
+    # Run per-section ETL, write raw payloads to data/<name>.json for
+    # inspection and downstream consumption. Don't overlay onto the bundle
+    # yet (their shapes don't match the seed contract — that's a follow-up).
     for name, build in SECTIONS:
         print(f"[etl] {name}...")
         try:
             payload = build()
             write_json(f"data/{name}.json", payload)
-            bundle[name] = payload
         except Exception as e:
             print(f"  !! {name} FAILED: {e}")
             traceback.print_exc()
             failures.append(name)
 
-    # Overview is built from per-section files, so do it last.
+    # Overview is built from per-section files. Its outputs (ticker,
+    # healthScore, regions) DO match the seed contract, so we overlay them.
     print("[etl] overview...")
     try:
         ov = fetch_overview.build()
         write_json("data/overview.json", ov)
         bundle["overview"] = ov
-        # The React components read window.MACRO.ticker / .healthScore / .regions
-        # directly at the top level (not under overview), so mirror them here.
-        bundle["regions"]     = ov.get("regions")
-        bundle["healthScore"] = ov.get("healthScore")
-        bundle["ticker"]      = ov.get("ticker", [])
+        if ov.get("regions"):     bundle["regions"]     = ov["regions"]
+        if ov.get("healthScore"): bundle["healthScore"] = ov["healthScore"]
+        if ov.get("ticker"):      bundle["ticker"]      = ov["ticker"]
     except Exception as e:
         print(f"  !! overview FAILED: {e}")
         failures.append("overview")

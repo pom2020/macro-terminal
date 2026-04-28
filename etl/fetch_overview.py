@@ -61,23 +61,33 @@ def build() -> dict:
 
     # Ticker — primary source FRED (works through corporate firewalls and
     # is rock-solid). Stooq is a fallback for symbols FRED doesn't carry.
+    def _ticker_item(label: str, last: float, prev: float) -> dict:
+        # Match the prototype's ticker item shape — val and chg are pre-
+        # formatted strings, dir is "up"/"down". The React ticker bar reads
+        # these directly without parsing.
+        chg_pct = ((last / prev - 1) * 100) if prev else 0
+        # Format the value: 2 decimals if >= 100, more precision if smaller
+        if last >= 100:
+            val_str = f"{last:,.2f}"
+        elif last >= 1:
+            val_str = f"{last:,.3f}"
+        else:
+            val_str = f"{last:,.4f}"
+        chg_str = f"{chg_pct:+.2f}%"
+        return {"sym": label, "val": val_str, "chg": chg_str,
+                "dir": "up" if chg_pct >= 0 else "down"}
+
     def _from_fred(series_id: str, label: str) -> dict | None:
         s = safe(fred, series_id, default=[])
         if not s or len(s) < 2:
             return None
-        last = s[-1][1]
-        prev = s[-2][1]
-        return {"sym": label, "val": round(last, 4),
-                "chg": round(((last / prev - 1) * 100), 2) if prev else 0}
+        return _ticker_item(label, s[-1][1], s[-2][1])
 
     def _from_stooq(symbol: str, label: str) -> dict | None:
         s = safe(stooq_daily, symbol, default=[])
         if not s or len(s) < 2:
             return None
-        last = s[-1][1]
-        prev = s[-2][1]
-        return {"sym": label, "val": round(last, 4),
-                "chg": round(((last / prev - 1) * 100), 2) if prev else 0}
+        return _ticker_item(label, s[-1][1], s[-2][1])
 
     fred_ticker_specs = [
         ("SP500",                  "SPX"),     # S&P 500
