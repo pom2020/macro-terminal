@@ -281,6 +281,35 @@ def gdelt_tone(query: str, *, timespan: str = "24h") -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# FRED Releases — official US economic data release calendar
+# ---------------------------------------------------------------------------
+def fred_release_dates(*, days_ahead: int = 14, days_back: int = 2,
+                        limit: int = 200) -> list[dict]:
+    """Return upcoming + just-past FRED releases.
+
+    Output rows: {release_id, release_name, date, real_time_start, ...}.
+    Uses the public 'releases/dates' endpoint. Requires FRED_KEY.
+    """
+    if not _FRED_KEY:
+        return []
+    today = dt.date.today()
+    start = (today - dt.timedelta(days=days_back)).isoformat()
+    end = (today + dt.timedelta(days=days_ahead)).isoformat()
+    try:
+        r = _retry_get(
+            "https://api.stlouisfed.org/fred/releases/dates",
+            params={"api_key": _FRED_KEY, "file_type": "json",
+                    "realtime_start": start, "realtime_end": end,
+                    "limit": limit, "sort_order": "asc",
+                    "include_release_dates_with_no_data": "true"},
+        )
+        return r.json().get("release_dates", [])
+    except Exception as e:
+        print(f"  !! fred_release_dates failed: {e}")
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Misc CSV downloaders (CBOE put/call, NY Fed recession, GPR, EPU)
 # ---------------------------------------------------------------------------
 def cboe_put_call_latest() -> tuple[str, float] | None:

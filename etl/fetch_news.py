@@ -1,55 +1,248 @@
-"""News section — GDELT 2.0 headlines + tone-based sentiment."""
+"""News section — GDELT 2.0 headlines + FRED Releases economic calendar.
+
+Output shape matches the SecNews React component contract:
+  {
+    asOf, headlines: [{time,date,region,impact,sentiment,tag,title,
+                        summary,moved}, ...],
+    calendar: [{date,time,region,event,prev,cons,impact}, ...],
+    cbSpeak: [],          # not auto-fetchable; empty list rendered cleanly
+    whatHappened: {narrative: {stance, text}, author}
+  }
+"""
 from __future__ import annotations
 
-from etl._common import (utcnow_iso, write_json, safe, gdelt_articles,
-                          gdelt_tone)
+import datetime as dt
+import json
+import os
+import re
 
-# Reduced from 8 to 4 topics + we no longer call gdelt_tone separately
-# (the artlist response already includes per-article tone; we average that).
-# This keeps the news fetch under ~30s end-to-end even when GDELT is slow.
-QUERIES = {
-    "macro":    "(GDP OR inflation OR \"federal reserve\" OR unemployment)",
-    "markets":  "(\"stock market\" OR \"S&P 500\" OR VIX OR \"bond yields\")",
-    "fiscal":   "(\"federal deficit\" OR \"national debt\" OR \"government spending\")",
-    "risk":     "(geopolitics OR sanctions OR conflict OR \"financial stress\")",
+from etl._common import (utcnow_iso, write_json, safe, gdelt_articles,
+                          fred_release_dates)
+
+
+# Topic queries (each maps to a section / region tag)
+TOPIC_QUERIES = [
+    ("FED",     "US", "(federal reserve OR Powell OR FOMC OR \"interest rate\")"),
+    ("ECB",     "EU", "(ECB OR \"european central bank\" OR Lagarde)"),
+    ("DATA",    "US", "(\"retail sales\" OR \"jobs report\" OR CPI OR PCE OR GDP)"),
+    ("PBoC",    "CN", "(China OR PBoC OR \"Bank of China\")"),
+    ("BoJ",     "JP", "(\"Bank of Japan\" OR BOJ OR Ueda OR yen)"),
+    ("OIL",     "US", "(\"oil prices\" OR brent OR OPEC)"),
+    ("CREDIT",  "US", "(credit OR lending OR bond yields OR spreads)"),
+    ("FISCAL",  "US", "(\"federal deficit\" OR \"national debt\" OR CBO)"),
+]
+
+# Critical-impact tags get the red treatment in the UI
+CRITICAL_TAGS = {"FED", "ECB", "PBoC", "BoJ"}
+HIGH_TAGS = {"DATA", "OIL"}
+
+
+def _classify_sentiment(tone: float | None) -> str:
+    """GDELT tone roughly maps to:
+       < -3   = pessimistic / hawkish (rates / inflation context)
+       > +3   = optimistic / dovish
+       else   = neutral
+    """
+    if tone is None:
+        return "neutral"
+    if tone <= -2.5:
+        return "hawkish"
+    if tone >= 2.5:
+        return "dovish"
+    return "neutral"
+
+
+def _format_seen_at(seendate: str | None) -> tuple[str, str]:
+    """GDELT seendate is YYYYMMDDHHMMSS UTC. Return (HH:MM ET, Mon DD)."""
+    if not seendate or len(seendate) < 12:
+        return ("", "")
+    try:
+        ts = dt.datetime.strptime(seendate[:12], "%Y%m%d%H%M")
+        # Convert to US Eastern (very rough — UTC-4 / UTC-5; we use -4 for
+        # daylight time. Display is illustrative, not exact.)
+        et = ts - dt.timedelta(hours=4)
+        return (et.strftime("%H:%M ET"), et.strftime("%b %d"))
+    except Exception:
+        return ("", "")
+
+
+def _fetch_headlines() -> list[dict]:
+    items: list[dict] = []
+    for tag, region, query in TOPIC_QUERIES:
+        articles = safe(gdelt_articles, query, max_records=4,
+                         timespan="48h", default=[]) or []
+        for a in articles:
+            time_str, date_str = _format_seen_at(a.get("seendate"))
+            tone = a.get("tone")
+            try:
+                tone = float(tone) if tone not in (None, "") else None
+            except (TypeError, ValueError):
+                tone = None
+            items.append({
+                "time": time_str or "",
+                "date": date_str or "",
+                "region": region,
+                "impact": "critical" if tag in CRITICAL_TAGS
+                           else "high" if tag in HIGH_TAGS else "med",
+                "sentiment": _classify_sentiment(tone),
+                "tag": tag,
+                "title": (a.get("title") or "")[:160],
+                "summary": (a.get("title") or "")[:280],   # GDELT artlist has no body
+                "moved": [],   # left empty; we don't have desk attribution
+                "_seendate": a.get("seendate") or "",
+                "_url": a.get("url") or "",
+            })
+    # Sort newest first by raw seendate string (lexicographic == chronological)
+    items.sort(key=lambda x: x["_seendate"], reverse=True)
+    # De-dupe similar titles
+    seen_titles: set[str] = set()
+    deduped: list[dict] = []
+    for it in items:
+        key = re.sub(r"\W+", "", it["title"].lower())[:60]
+        if key in seen_titles or not key:
+            continue
+        seen_titles.add(key)
+        deduped.append(it)
+    return deduped[:12]
+
+
+# Map FRED release names → (event display name, impact)
+RELEASE_IMPACT: dict[str, tuple[str, str]] = {
+    "Employment Situation":           ("Nonfarm Payrolls",       "critical"),
+    "Consumer Price Index":           ("CPI",                    "critical"),
+    "Personal Income and Outlays":    ("Core PCE",               "critical"),
+    "Gross Domestic Product":         ("GDP Advance",            "critical"),
+    "FOMC":                            ("FOMC Rate Decision",    "critical"),
+    "Producer Price Index":           ("PPI",                    "high"),
+    "Retail Sales":                    ("Retail Sales",          "high"),
+    "Industrial Production":           ("Industrial Production", "high"),
+    "Job Openings and Labor Turnover": ("JOLTS Openings",        "high"),
+    "ADP":                             ("ADP Private Payrolls",  "high"),
+    "Housing Starts":                  ("Housing Starts",        "med"),
+    "New Residential":                 ("New Home Sales",        "med"),
+    "Existing Home Sales":             ("Existing Home Sales",   "med"),
+    "Durable Goods":                   ("Durable Goods Orders",  "high"),
+    "Consumer Sentiment":              ("UMich Consumer Sent.",  "med"),
+    "Personal Saving":                 ("Personal Income",       "med"),
+    "International Trade":             ("Trade Balance",         "med"),
+    "S&P":                             ("Case-Shiller HPI",      "med"),
+    "Construction Spending":           ("Construction Spending", "low"),
+    "Wholesale Trade":                 ("Wholesale Inventories", "low"),
+    "Beige Book":                      ("Fed Beige Book",        "med"),
+    "Fed":                             ("Fed Release",           "med"),
 }
 
 
-def build() -> dict:
-    headlines: dict[str, list] = {}
-    tones: dict[str, float | None] = {}
-    for topic, q in QUERIES.items():
-        articles = safe(gdelt_articles, q, max_records=6,
-                         timespan="24h", default=[]) or []
-        headlines[topic] = [
-            {
-                "title": a.get("title", "")[:160],
-                "url": a.get("url"),
-                "domain": a.get("domain"),
-                "seen_at": a.get("seendate"),
-                "language": a.get("language"),
-                "tone": a.get("tone"),
-            }
-            for a in articles
-        ]
-        # Compute average tone from the articles we already have, no second
-        # call needed.
-        tone_vals = []
-        for a in articles:
-            t = a.get("tone")
-            if t in (None, ""):
-                continue
-            try:
-                tone_vals.append(float(t))
-            except (TypeError, ValueError):
-                continue
-        tones[topic] = (round(sum(tone_vals) / len(tone_vals), 2)
-                        if tone_vals else None)
+def _format_calendar_date(d: str) -> str:
+    """Convert YYYY-MM-DD to 'Mon DD (Day)'."""
+    try:
+        when = dt.date.fromisoformat(d)
+        return when.strftime("%b %d (%a)")
+    except Exception:
+        return d
+
+
+def _fetch_calendar() -> list[dict]:
+    rows = fred_release_dates(days_ahead=14, days_back=1, limit=200) or []
+    out: list[dict] = []
+    for r in rows:
+        rname = r.get("release_name", "") or ""
+        # Match the first keyword in the rname against our impact map
+        impact_event: tuple[str, str] | None = None
+        for needle, mapping in RELEASE_IMPACT.items():
+            if needle.lower() in rname.lower():
+                impact_event = mapping
+                break
+        if impact_event is None:
+            # Skip low-signal releases to keep the table compact
+            continue
+        event, impact = impact_event
+        out.append({
+            "date": _format_calendar_date(r.get("date", "")),
+            "time": "08:30",   # most US releases drop at 08:30 ET
+            "region": "US",
+            "event": f"{event} · {rname[:40]}",
+            "prev": "—",
+            "cons": "—",
+            "impact": impact,
+        })
+    # Truncate to ~17 to fit the table layout
+    return out[:17]
+
+
+def _auto_narrative(asof: str) -> dict:
+    """Generate a short 'week in macro' paragraph from current data.
+
+    Reads the per-section JSON files we just wrote in this same ETL run.
+    """
+    def load(name: str) -> dict:
+        p = f"data/{name}.json"
+        if not os.path.exists(p):
+            return {}
+        try:
+            return json.load(open(p))
+        except Exception:
+            return {}
+
+    g = load("growth"); i = load("inflation"); l = load("labor")
+    m = load("monetary"); r = load("risk")
+
+    cpi = ((i.get("cpi") or {}).get("headline"))
+    core = ((i.get("cpi") or {}).get("core"))
+    u3 = ((l.get("unemployment") or {}).get("u3"))
+    real_yoy = ((g.get("gdp") or {}).get("real_yoy"))
+    curve_bp = ((m.get("curve") or {}).get("current_2s10s_bp"))
+    stlfsi = ((r.get("stress") or {}).get("stlfsi"))
+
+    bits: list[str] = []
+    stance = "neutral"
+    if cpi is not None and core is not None:
+        bits.append(f"<em>Headline CPI {cpi:.1f}% YoY</em>, core {core:.1f}%")
+        if cpi > 3:
+            stance = "hawkish"
+        elif cpi < 2.2:
+            stance = "dovish"
+    if u3 is not None:
+        bits.append(f"unemployment {u3:.1f}%")
+    if real_yoy is not None:
+        bits.append(f"real GDP {real_yoy:+.1f}% YoY")
+    if curve_bp is not None:
+        bits.append(f"<em>2s10s {curve_bp:+.0f}bp</em>")
+    if stlfsi is not None:
+        bits.append(f"STLFSI {stlfsi:+.2f}")
+
+    if not bits:
+        text = ("<em>The week in macro</em>: data refresh in progress; "
+                "see individual section tabs for the latest numbers.")
+    else:
+        text = ("<em>The week in macro</em>: " + "; ".join(bits) +
+                ". Auto-generated from live FRED data, refreshed every hour.")
 
     return {
-        "asOf": utcnow_iso(),
-        "headlines": headlines,
-        "sentiment": tones,  # tone -10..+10 (negative = pessimistic)
+        "narrative": {"stance": stance, "text": text},
+        "author": f"Auto · {asof[:10]}",
+    }
+
+
+def build() -> dict:
+    asof = utcnow_iso()
+    headlines = _fetch_headlines()
+    calendar = _fetch_calendar()
+
+    return {
+        "asOf": asof,
+        "headlines": headlines or [{
+            "time": dt.datetime.utcnow().strftime("%H:%M UTC"),
+            "date": dt.datetime.utcnow().strftime("%b %d"),
+            "region": "GL", "impact": "med", "sentiment": "neutral",
+            "tag": "INFO",
+            "title": "GDELT news feed unavailable this run — try again next refresh",
+            "summary": "Headlines come from GDELT 2.0 (free). Refreshed hourly.",
+            "moved": [],
+        }],
+        "calendar": calendar,
+        "cbSpeak": [],
+        "whatHappened": _auto_narrative(asof),
     }
 
 

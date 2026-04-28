@@ -58,11 +58,16 @@ def main() -> int:
     # Run per-section ETL, write raw payloads to data/<name>.json for
     # inspection and downstream consumption. Don't overlay onto the bundle
     # yet (their shapes don't match the seed contract — that's a follow-up).
+    # EXCEPTION: news already produces the seed-compatible shape, so we
+    # overlay it.
     for name, build in SECTIONS:
         print(f"[etl] {name}...")
         try:
             payload = build()
             write_json(f"data/{name}.json", payload)
+            if name == "news":
+                # SecNews component reads window.MACRO.news (after our patch)
+                bundle["news"] = payload
         except Exception as e:
             print(f"  !! {name} FAILED: {e}")
             traceback.print_exc()
