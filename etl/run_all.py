@@ -26,6 +26,7 @@ import traceback
 from etl import (fetch_growth, fetch_inflation, fetch_labor, fetch_monetary,
                  fetch_external, fetch_markets, fetch_fiscal, fetch_risk,
                  fetch_news, fetch_overview)
+from etl._adapters import adapt
 from etl._common import utcnow_iso, write_json
 
 SEED_PATH = os.path.join(os.path.dirname(__file__), "_seed_macro.json")
@@ -56,18 +57,21 @@ def main() -> int:
     bundle["asOf"] = utcnow_iso()
 
     # Run per-section ETL, write raw payloads to data/<name>.json for
-    # inspection and downstream consumption. Don't overlay onto the bundle
-    # yet (their shapes don't match the seed contract — that's a follow-up).
-    # EXCEPTION: news already produces the seed-compatible shape, so we
-    # overlay it.
+    # inspection, then run the shape adapter to merge live values into the
+    # seed contract that the React components actually read.
     for name, build in SECTIONS:
         print(f"[etl] {name}...")
         try:
             payload = build()
             write_json(f"data/{name}.json", payload)
             if name == "news":
-                # SecNews component reads window.MACRO.news (after our patch)
+                # SecNews component reads window.MACRO.news directly (after
+                # our build_public_html patch).
                 bundle["news"] = payload
+            else:
+                # Every other section gets reshaped to the seed contract so
+                # the existing React components read live values.
+                bundle[name] = adapt(name, payload, bundle.get(name, {}))
         except Exception as e:
             print(f"  !! {name} FAILED: {e}")
             traceback.print_exc()
