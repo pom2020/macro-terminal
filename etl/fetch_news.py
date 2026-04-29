@@ -32,11 +32,16 @@ TOPIC_QUERIES = [
     ("FED",     "US", _en("federal reserve OR Powell OR FOMC OR \"interest rate\"")),
     ("ECB",     "EU", _en("ECB OR \"european central bank\" OR Lagarde")),
     ("DATA",    "US", _en("\"retail sales\" OR \"jobs report\" OR CPI OR PCE OR GDP")),
-    ("PBoC",    "CN", _en("China OR PBoC OR \"Bank of China\"")),
     ("BoJ",     "JP", _en("\"Bank of Japan\" OR BOJ OR Ueda OR yen")),
-    ("OIL",     "US", _en("\"oil prices\" OR brent OR OPEC")),
+    # Energy beat — replaces narrow OIL with broader energy commodity coverage
+    ("ENERGY",  "GL", _en("(\"oil prices\" OR brent OR WTI OR OPEC OR \"natural gas\" "
+                             "OR LNG OR \"gasoline prices\" OR \"crude oil\" OR refinery "
+                             "OR \"energy markets\")")),
     ("CREDIT",  "US", _en("credit OR lending OR \"bond yields\" OR spreads")),
     ("FISCAL",  "US", _en("\"federal deficit\" OR \"national debt\" OR CBO")),
+    # PBoC/China dropped — most articles came back filtered (non-English
+    # sources or off-topic). Coverage is preserved indirectly via DATA / ENERGY
+    # which often reference China data when material.
 ]
 
 # Accept several forms GDELT may return: full English name, ISO 639-1 code,
@@ -50,8 +55,8 @@ def _is_english(article: dict) -> bool:
     return lang in ENGLISH_LANG_CODES
 
 # Critical-impact tags get the red treatment in the UI
-CRITICAL_TAGS = {"FED", "ECB", "PBoC", "BoJ"}
-HIGH_TAGS = {"DATA", "OIL"}
+CRITICAL_TAGS = {"FED", "ECB", "BoJ"}
+HIGH_TAGS = {"DATA", "ENERGY"}
 
 
 def _classify_sentiment(tone: float | None) -> str:
@@ -88,9 +93,8 @@ GNEWS_QUERIES = {
     "FED":    "Federal Reserve interest rate",
     "ECB":    "European Central Bank rate",
     "DATA":   "US economic data",
-    "PBoC":   "China economy",
     "BoJ":    "Bank of Japan",
-    "OIL":    "oil prices",
+    "ENERGY": "oil prices natural gas OPEC",
     "CREDIT": "bond yields credit",
     "FISCAL": "US federal deficit",
 }
