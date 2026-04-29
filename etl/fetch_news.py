@@ -17,7 +17,8 @@ import os
 import re
 
 from etl._common import (utcnow_iso, write_json, safe, gdelt_articles,
-                          fred_release_dates, google_news_rss)
+                          fred_release_dates, google_news_rss,
+                          investing_commodities_rss, oilprice_rss)
 
 
 # Topic queries (each maps to a section / region tag).
@@ -65,6 +66,80 @@ ENERGY_TITLE_KEYWORDS = (
     "natural gas", "lng", "refinery", "refining", "barrel",
     "energy", "petroleum", "diesel", "fuel",
 )
+
+
+def _rss_to_news_item(rss_item: dict, *, tag: str = "ENERGY",
+                       region: str = "GL", impact: str = "high") -> dict:
+    """Convert an RSS item dict to our news-item shape."""
+    pub = rss_item.get("pub") or ""
+    seendate, time_str, date_str = "", "", ""
+    # RFC-822 date "Mon, 28 Apr 2026 14:32:00 GMT"
+    for fmt in ("%a, %d %b %Y %H:%M:%S %Z", "%a, %d %b %Y %H:%M:%S",
+                 "%a, %d %b %Y %H:%M %Z", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            ts = dt.datetime.strptime(pub[:25].strip(), fmt[:25] if len(fmt) > 25 else fmt)
+            et = ts - dt.timedelta(hours=4)   # rough UTC -> ET
+            time_str = et.strftime("%H:%M ET")
+            date_str = et.strftime("%b %d")
+            seendate = ts.strftime("%Y%m%d%H%M%S")
+            break
+        except Exception:
+            continue
+    title = (rss_item.get("title") or "")[:160]
+    summary = (rss_item.get("summary") or title)[:280]
+    return {
+        "time":      time_str,
+        "date":      date_str,
+        "region":    region,
+        "impact":    impact,
+        "sentiment": "neutral",   # RSS feeds don't carry tone scores
+        "tag":       tag,
+        "title":     title,
+        "summary":   summary,
+        "moved":     [],
+        "url":       rss_item.get("link") or "",
+        "_seendate": seendate,
+    }
+
+
+def _supplement_energy_from_rss(existing: list[dict], target: int) -> list[dict]:
+    """If GDELT under-delivered ENERGY headlines, pull more from
+    Investing.com Commodities News RSS, then OilPrice.com — both free,
+    both genuinely energy-focused, both filtered through _is_energy_relevant
+    so non-energy items get dropped."""
+    if len(existing) >= target:
+        return existing
+
+    seen_titles = {it.get("title", "").lower() for it in existing}
+    out = list(existing)
+
+    sources = (
+        ("Investing.com", investing_commodities_rss),
+        ("OilPrice.com",  oilprice_rss),
+    )
+    for source_name, fetch_fn in sources:
+        if len(out) >= target:
+            break
+        feed = safe(fetch_fn, default=[]) or []
+        added = 0
+        for ri in feed:
+            if len(out) >= target:
+                break
+            title = ri.get("title", "")
+            tlow = title.lower().strip()
+            if not tlow or tlow in seen_titles:
+                continue
+            # Both Investing.com Commodities + OilPrice are energy-themed,
+            # but they cover metals/grains too. Apply our title filter.
+            if not _is_energy_relevant(title):
+                continue
+            seen_titles.add(tlow)
+            out.append(_rss_to_news_item(ri, tag="ENERGY",
+                                          region="GL", impact="high"))
+            added += 1
+        if added:
+            print(f"  + supplemented {added} headlines from {source_name}")
+    return out
 
 
 def _is_energy_relevant(title: str) -> bool:
@@ -222,6 +297,16 @@ def _fetch_headlines() -> list[dict]:
                 "url": a.get("url") or "",
                 "_seendate": a.get("seendate") or "",
             })
+
+        # ENERGY-only: supplement from Investing.com / OilPrice RSS if GDELT
+        # under-delivered. Target ENERGY_CAP so the section is always full.
+        if tag in ENERGY_TAGS and len(topic_items) < ENERGY_CAP:
+            print(f"  + GDELT returned {len(topic_items)} ENERGY items; "
+                  f"supplementing from RSS to reach {ENERGY_CAP}...")
+            topic_items = _supplement_energy_from_rss(topic_items, ENERGY_CAP)
+            # Re-sort merged list by recency
+            topic_items.sort(key=lambda x: x.get("_seendate") or "", reverse=True)
+
         items_by_tag[tag] = topic_items
 
     def _round_robin(tags: list[str], cap: int,

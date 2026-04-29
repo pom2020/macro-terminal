@@ -374,6 +374,78 @@ def google_news_rss(query: str, *, lang: str = "en", max_items: int = 10
 
 
 # ---------------------------------------------------------------------------
+# Generic RSS feed parser — shared by Google News + Investing.com + OilPrice
+# ---------------------------------------------------------------------------
+def _parse_rss(text: str, max_items: int = 30) -> list[dict]:
+    """Lightweight RSS 2.0 / Atom parser. Returns list of dicts with
+    {title, link, pub, summary, source}."""
+    import re as _re
+    items: list[dict] = []
+    for m in _re.finditer(r"<item>(.*?)</item>", text, flags=_re.S):
+        block = m.group(1)
+
+        def field(name):
+            mm = _re.search(rf"<{name}[^>]*>(.*?)</{name}>", block, flags=_re.S)
+            if not mm:
+                return ""
+            v = mm.group(1)
+            cd = _re.search(r"<!\[CDATA\[(.*?)\]\]>", v, flags=_re.S)
+            if cd:
+                v = cd.group(1)
+            v = _re.sub(r"<[^>]+>", " ", v).strip()
+            return v
+
+        items.append({
+            "title":   field("title"),
+            "link":    field("link"),
+            "pub":     field("pubDate"),
+            "summary": field("description"),
+            "source":  field("source"),
+        })
+        if len(items) >= max_items:
+            break
+    return items
+
+
+# ---------------------------------------------------------------------------
+# Investing.com commodities news RSS — fallback for Energy / Commodities
+# ---------------------------------------------------------------------------
+def investing_commodities_rss(max_items: int = 25) -> list[dict]:
+    """Fetch Investing.com Commodities News RSS feed (category 25)."""
+    try:
+        r = _retry_get(
+            "https://www.investing.com/rss/news_25.rss",
+            timeout=10, max_retries=1,
+        )
+    except Exception as e:
+        print(f"  !! investing_commodities_rss failed: {e}")
+        return []
+    out = _parse_rss(r.text, max_items=max_items)
+    for it in out:
+        it["source"] = it.get("source") or "Investing.com"
+    return out
+
+
+# ---------------------------------------------------------------------------
+# OilPrice.com RSS — additional fallback for Energy
+# ---------------------------------------------------------------------------
+def oilprice_rss(max_items: int = 20) -> list[dict]:
+    """Fetch OilPrice.com main news RSS feed."""
+    try:
+        r = _retry_get(
+            "https://oilprice.com/rss/main",
+            timeout=10, max_retries=1,
+        )
+    except Exception as e:
+        print(f"  !! oilprice_rss failed: {e}")
+        return []
+    out = _parse_rss(r.text, max_items=max_items)
+    for it in out:
+        it["source"] = it.get("source") or "OilPrice.com"
+    return out
+
+
+# ---------------------------------------------------------------------------
 # IMF DataMapper / COFER — global FX reserves
 # ---------------------------------------------------------------------------
 def imf_cofer_total_reserves(country_code: str) -> float | None:
