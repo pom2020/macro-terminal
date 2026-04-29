@@ -33,10 +33,12 @@ TOPIC_QUERIES = [
     ("ECB",     "EU", _en("ECB OR \"european central bank\" OR Lagarde")),
     ("DATA",    "US", _en("\"retail sales\" OR \"jobs report\" OR CPI OR PCE OR GDP")),
     ("BoJ",     "JP", _en("\"Bank of Japan\" OR BOJ OR Ueda OR yen")),
-    # Energy beat — single-paren form so _en() doesn't double-wrap. Six core
-    # terms: enough breadth to surface daily news, short enough that GDELT's
-    # query parser doesn't hiccup.
-    ("ENERGY",  "GL", _en("oil OR OPEC OR \"natural gas\" OR LNG OR brent OR refinery")),
+    # Energy beat — phrase-anchored query to avoid grabbing political pieces
+    # that just happen to mention "oil" once. We further filter by title in
+    # _is_energy_relevant() below so only genuinely energy stories survive.
+    ("ENERGY",  "GL", _en("\"oil price\" OR \"oil prices\" OR \"crude oil\" "
+                            "OR OPEC OR \"natural gas\" OR LNG "
+                            "OR brent OR WTI OR \"refining margin\" OR \"gasoline price\"")),
     ("CREDIT",  "US", _en("credit OR lending OR \"bond yields\" OR spreads")),
     ("FISCAL",  "US", _en("\"federal deficit\" OR \"national debt\" OR CBO")),
     # PBoC/China dropped — most articles came back filtered (non-English
@@ -53,6 +55,42 @@ def _is_english(article: dict) -> bool:
     """Defensive post-filter — drop anything explicitly tagged non-English."""
     lang = (article.get("language") or "").strip().lower()
     return lang in ENGLISH_LANG_CODES
+
+
+# Title must contain at least one of these to qualify as a genuine energy /
+# commodities story. Prevents political pieces that mention "oil" once in
+# passing from leaking into the Energy & Commodities card.
+ENERGY_TITLE_KEYWORDS = (
+    "oil", "opec", "crude", "brent", "wti", "gasoline", "petrol",
+    "natural gas", "lng", "refinery", "refining", "barrel",
+    "energy", "petroleum", "diesel", "fuel",
+)
+
+
+def _is_energy_relevant(title: str) -> bool:
+    """Return True if the title clearly indicates an energy/commodities
+    story. Used as a post-fetch safety filter for the ENERGY topic."""
+    if not title:
+        return False
+    low = title.lower()
+    # Reject obvious political / personality pieces that GDELT might match
+    # because the body mentions "oil" once. Keep this list minimal and only
+    # for terms that almost never appear in genuine energy headlines.
+    political_traps = ("trump", "biden", "harris", "vance", "election")
+    has_energy_kw = any(kw in low for kw in ENERGY_TITLE_KEYWORDS)
+    if not has_energy_kw:
+        return False
+    # If a political name dominates the title and there's no clear price
+    # angle, drop it. Allow it through if both a politician AND a strong
+    # price/trade keyword appear (e.g. "Biden Iran sanctions oil exports").
+    is_political = any(p in low for p in political_traps)
+    if is_political:
+        strong_terms = ("price", "barrel", "opec", "brent", "wti",
+                         "lng", "refinery", "production", "export", "import",
+                         "sanctions", "embargo", "supply", "demand")
+        if not any(s in low for s in strong_terms):
+            return False
+    return True
 
 # Critical-impact tags get the red treatment in the UI
 CRITICAL_TAGS = {"FED", "ECB", "BoJ"}
@@ -127,28 +165,35 @@ def _match_summary(gnews_items: list[dict], gdelt_title: str) -> str:
     return best[0][:280] if best[1] >= 2 else ""
 
 
+ENERGY_TAGS = {"ENERGY", "OIL"}
+ECONOMIC_CAP = 10      # max articles in the Economic Headlines card
+ENERGY_CAP = 10        # max articles in the Energy & Commodities card
+
+
 def _fetch_headlines() -> list[dict]:
     summaries_by_tag = _fetch_summaries_per_tag()
-    # Group articles by tag so we can round-robin and guarantee every
-    # topic (including ENERGY) makes it onto the page even when FED / ECB
-    # headlines are noisier in the same window.
+    # Per-topic article fetch + filter + bucket
     items_by_tag: dict[str, list[dict]] = {}
     for tag, region, query in TOPIC_QUERIES:
-        # First attempt: with sourcelang:english filter at GDELT
-        articles = safe(gdelt_articles, query, max_records=6,
-                         timespan="48h", default=[]) or []
-        # If the filter killed everything for this topic (rate limit or
-        # empty result), retry without sourcelang and post-filter on the
-        # article-level language field so we still get some content.
+        # ENERGY needs more candidates because the title filter is strict
+        # (drops political pieces). Use a longer window too so we have
+        # enough genuine energy stories.
+        max_rec = 20 if tag in ENERGY_TAGS else 8
+        span = "72h" if tag in ENERGY_TAGS else "48h"
+
+        articles = safe(gdelt_articles, query, max_records=max_rec,
+                         timespan=span, default=[]) or []
         if not articles:
             bare = query.replace(" sourcelang:english", "")
-            articles = safe(gdelt_articles, bare, max_records=8,
-                             timespan="48h", default=[]) or []
-        # Defensive post-filter — drop articles GDELT explicitly tagged as
-        # non-English.
+            articles = safe(gdelt_articles, bare, max_records=max_rec * 2,
+                             timespan=span, default=[]) or []
         articles = [a for a in articles if _is_english(a)]
 
-        # Sort each topic's own list by recency so the most recent appears first
+        if tag in ENERGY_TAGS:
+            # Title-level filter — keep only genuine energy/commodities pieces
+            articles = [a for a in articles
+                        if _is_energy_relevant(a.get("title") or "")]
+
         articles.sort(key=lambda a: a.get("seendate") or "", reverse=True)
 
         topic_items: list[dict] = []
@@ -174,30 +219,38 @@ def _fetch_headlines() -> list[dict]:
                 "title": title,
                 "summary": summary,
                 "moved": [],
-                "url": a.get("url") or "",       # public — used by <a href>
+                "url": a.get("url") or "",
                 "_seendate": a.get("seendate") or "",
             })
         items_by_tag[tag] = topic_items
 
-    # Round-robin: pick the Nth item from each topic in turn, so every topic
-    # is represented before any topic gets a second slot. Cap each topic at
-    # 3 articles to avoid one busy topic flooding the list.
-    seen_titles: set[str] = set()
-    final: list[dict] = []
-    max_per_topic = 3
-    for round_num in range(max_per_topic):
-        for tag in items_by_tag:
-            bucket = items_by_tag[tag]
-            if round_num >= len(bucket):
-                continue
-            it = bucket[round_num]
-            key = re.sub(r"\W+", "", it["title"].lower())[:60]
-            if not key or key in seen_titles:
-                continue
-            seen_titles.add(key)
-            final.append(it)
-    # Cap total to keep UI compact
-    return final[:14]
+    def _round_robin(tags: list[str], cap: int,
+                      max_per_topic: int) -> list[dict]:
+        """Round-robin pick across topics, dedupe by title, stop at cap."""
+        seen: set[str] = set()
+        out: list[dict] = []
+        for round_num in range(max_per_topic):
+            for tag in tags:
+                if len(out) >= cap:
+                    return out
+                bucket = items_by_tag.get(tag, [])
+                if round_num >= len(bucket):
+                    continue
+                it = bucket[round_num]
+                key = re.sub(r"\W+", "", it["title"].lower())[:60]
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                out.append(it)
+        return out
+
+    economic_tags = [t for t, _, _ in TOPIC_QUERIES if t not in ENERGY_TAGS]
+    energy_tags   = [t for t, _, _ in TOPIC_QUERIES if t in ENERGY_TAGS]
+
+    economic = _round_robin(economic_tags, cap=ECONOMIC_CAP, max_per_topic=3)
+    energy   = _round_robin(energy_tags,   cap=ENERGY_CAP,   max_per_topic=ENERGY_CAP)
+
+    return economic + energy
 
 
 # Map FRED release names → (event display name, impact)
