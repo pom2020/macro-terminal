@@ -15,6 +15,8 @@ def build() -> dict:
     ip = fred("INDPRO") or []
     tcu = fred("TCU") or []
     pot = fred("GDPPOT") or []
+    # Fetch the QoQ-SAAR series so we can compute delta vs. the prior quarter
+    saar_series = fred("A191RL1Q225SBEA") or []
     # Phila Fed Leading Index — used as Conference Board LEI proxy
     lei = fred("USSLIND") or []
     # Phila Fed Manufacturing Business Outlook — used as ISM Mfg PMI proxy.
@@ -40,11 +42,14 @@ def build() -> dict:
             ),
         },
         "gdp": {
-            "real_qoq_saar": safe(fred_latest, "A191RL1Q225SBEA",
-                                   default=("", 0.0))[1],
-            "real_yoy": real_yoy_series[-1][1] if real_yoy_series else None,
-            "nominal_yoy": nom_yoy_series[-1][1] if nom_yoy_series else None,
-            "potential": pot[-1][1] if pot else None,
+            "real_qoq_saar":      saar_series[-1][1] if saar_series else None,
+            "real_qoq_saar_prev": saar_series[-2][1] if len(saar_series) > 1 else None,
+            "real_yoy":      real_yoy_series[-1][1] if real_yoy_series else None,
+            "real_yoy_prev": real_yoy_series[-2][1] if len(real_yoy_series) > 1 else None,
+            "nominal_yoy":      nom_yoy_series[-1][1] if nom_yoy_series else None,
+            "nominal_yoy_prev": nom_yoy_series[-2][1] if len(nom_yoy_series) > 1 else None,
+            "potential":      pot[-1][1] if pot else None,
+            "potential_prev": pot[-2][1] if len(pot) > 1 else None,
             "series": trim(gdp_real, 40),
             "nominal_series": trim(gdp_nom, 40),     # NEW: nominal GDP series
             "labels": [d for d, _ in trim(gdp_real, 40)],

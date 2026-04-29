@@ -96,10 +96,18 @@ def shape_growth(raw: dict, seed: dict) -> dict:
     out = dict(seed)  # start from seed, override what we have
 
     gdp_raw = raw.get("gdp", {}) or {}
-    real_yoy = gdp_raw.get("real_yoy")
-    real_qoq = gdp_raw.get("real_qoq_saar")
-    nominal_yoy = gdp_raw.get("nominal_yoy")
-    potential = gdp_raw.get("potential")
+    real_yoy      = gdp_raw.get("real_yoy")
+    real_yoy_prev = gdp_raw.get("real_yoy_prev")
+    real_qoq      = gdp_raw.get("real_qoq_saar")
+    real_qoq_prev = gdp_raw.get("real_qoq_saar_prev")
+    nominal_yoy      = gdp_raw.get("nominal_yoy")
+    nominal_yoy_prev = gdp_raw.get("nominal_yoy_prev")
+    potential      = gdp_raw.get("potential")
+    potential_prev = gdp_raw.get("potential_prev")
+
+    def _delta(curr, prev):
+        if curr is None or prev is None: return 0
+        return round(curr - prev, 2)
 
     # gdp series → labels (quarterly) + real + nominal arrays
     series_raw = gdp_raw.get("series") or []
@@ -109,7 +117,9 @@ def shape_growth(raw: dict, seed: dict) -> dict:
         "real_qoq_saar": {
             "val": real_qoq if real_qoq is not None
                     else _safe(seed, "gdp", "real_qoq_saar", "val"),
-            "delta": _safe(seed, "gdp", "real_qoq_saar", "delta", default=0),
+            "delta": (_delta(real_qoq, real_qoq_prev)
+                       if real_qoq is not None and real_qoq_prev is not None
+                       else _safe(seed, "gdp", "real_qoq_saar", "delta", default=0)),
             "label": _safe(seed, "gdp", "real_qoq_saar", "label",
                             default="Real GDP"),
             "unit": "% SAAR",
@@ -119,17 +129,23 @@ def shape_growth(raw: dict, seed: dict) -> dict:
         "real_yoy": {
             "val": real_yoy if real_yoy is not None
                     else _safe(seed, "gdp", "real_yoy", "val"),
-            "delta": _safe(seed, "gdp", "real_yoy", "delta", default=0),
+            "delta": (_delta(real_yoy, real_yoy_prev)
+                       if real_yoy is not None and real_yoy_prev is not None
+                       else _safe(seed, "gdp", "real_yoy", "delta", default=0)),
         },
         "nominal_yoy": {
             "val": nominal_yoy if nominal_yoy is not None
                     else _safe(seed, "gdp", "nominal_yoy", "val"),
-            "delta": _safe(seed, "gdp", "nominal_yoy", "delta", default=0),
+            "delta": (_delta(nominal_yoy, nominal_yoy_prev)
+                       if nominal_yoy is not None and nominal_yoy_prev is not None
+                       else _safe(seed, "gdp", "nominal_yoy", "delta", default=0)),
         },
         "potential": {
             "val": potential if potential is not None
                     else _safe(seed, "gdp", "potential", "val", default=1.8),
-            "delta": 0,
+            "delta": (_delta(potential, potential_prev)
+                       if potential is not None and potential_prev is not None
+                       else 0),
         },
         "series": {
             "labels":  labels  if labels  else _safe(seed, "gdp", "series", "labels"),
@@ -188,21 +204,33 @@ def shape_growth(raw: dict, seed: dict) -> dict:
         if s:
             out["lei"]["series"] = [round(v, 2) for _, v in s]
 
-    # IP — last value + 24-month series
+    # IP — last value + month-over-month delta + 24-month series
     ip_raw = raw.get("ip", {}) or {}
     ip_series = ip_raw.get("series") or []
     if ip_series:
         out["ip"] = dict(seed.get("ip", {}))
         out["ip"]["val"] = round(ip_series[-1][1], 1)
+        if len(ip_series) > 1:
+            out["ip"]["delta"] = round(ip_series[-1][1] - ip_series[-2][1], 2)
         out["ip"]["yoy"] = ip_raw.get("yoy") or out["ip"].get("yoy")
         out["ip"]["series"] = [round(v, 1) for _, v in ip_series[-24:]]
 
-    # Capacity utilization
+    # Capacity utilization — last value + MoM delta + 20y average + series
     cu_raw = raw.get("caputil", {}) or {}
-    if cu_raw.get("val") is not None:
+    cu_series = cu_raw.get("series") or []
+    if cu_raw.get("val") is not None or cu_series:
         out["caputil"] = dict(seed.get("caputil", {}))
-        out["caputil"]["val"] = cu_raw["val"]
-        cu_series = cu_raw.get("series") or []
+        if cu_raw.get("val") is not None:
+            out["caputil"]["val"] = round(cu_raw["val"], 1)
+        if len(cu_series) > 1:
+            out["caputil"]["delta"] = round(cu_series[-1][1] - cu_series[-2][1], 2)
+        # 20-year average — last 240 monthly observations
+        if len(cu_series) >= 240:
+            avg_20y = sum(v for _, v in cu_series[-240:]) / 240
+            out["caputil"]["avg_20y"] = round(avg_20y, 1)
+        elif cu_series:
+            out["caputil"]["avg_20y"] = round(
+                sum(v for _, v in cu_series) / len(cu_series), 1)
         if cu_series:
             out["caputil"]["series"] = [round(v, 1) for _, v in cu_series[-24:]]
 
@@ -686,7 +714,7 @@ def shape_markets(raw: dict, seed: dict) -> dict:
         out["spx_series"]["ma50"]  = ma50_sampled
         out["spx_series"]["ma200"] = ma200_sampled
 
-    # Credit OAS
+    # Credit OAS — current + 1-month change in basis points
     cr = raw.get("credit", {}) or {}
     if cr.get("ig_oas") is not None:
         out["credit"] = dict(seed.get("credit", {}))
@@ -695,6 +723,13 @@ def shape_markets(raw: dict, seed: dict) -> dict:
         out["credit"]["hy_oas"] = int(round((cr.get("hy_oas") or 0) * 100))
         ig_series = cr.get("series_ig") or []
         hy_series = cr.get("series_hy") or []
+        # Month-over-month change in bp (FRED OAS is daily; ~21 trading days)
+        if len(ig_series) > 21:
+            out["credit"]["ig_chg"] = int(round(
+                (ig_series[-1][1] - ig_series[-22][1]) * 100))
+        if len(hy_series) > 21:
+            out["credit"]["hy_chg"] = int(round(
+                (hy_series[-1][1] - hy_series[-22][1]) * 100))
         if ig_series and hy_series:
             labels, ig_arr = _split_series(ig_series, 24)
             _,      hy_arr = _split_series(hy_series, 24)
