@@ -86,7 +86,12 @@ def _rss_to_news_item(rss_item: dict, *, tag: str = "ENERGY",
         except Exception:
             continue
     title = (rss_item.get("title") or "")[:160]
-    summary = (rss_item.get("summary") or title)[:280]
+    raw_summary = rss_item.get("summary") or ""
+    # Don't duplicate the title; don't show URL garbage
+    if not raw_summary or raw_summary.strip().lower() == title.strip().lower():
+        summary = ""
+    else:
+        summary = raw_summary[:280]
     return {
         "time":      time_str,
         "date":      date_str,
@@ -223,16 +228,21 @@ def _fetch_summaries_per_tag() -> dict[str, list[dict]]:
 
 
 def _match_summary(gnews_items: list[dict], gdelt_title: str) -> str:
-    """Find the closest matching Google News summary for a GDELT title."""
+    """Find the closest matching Google News summary for a GDELT title.
+    The RSS parser already strips link-redirect garbage, but we re-validate
+    here as a safety net so the UI never sees `<a href=...` literals."""
+    from etl._common import _is_rss_garbage
     if not gnews_items or not gdelt_title:
         return ""
-    # Score by word overlap
     target_words = set(gdelt_title.lower().split())
     best = ("", 0)
     for it in gnews_items:
         t = (it.get("title") or "").lower()
-        s = (it.get("summary") or "")
-        if not s:
+        s = (it.get("summary") or "").strip()
+        if not s or _is_rss_garbage(s):
+            continue
+        # Skip "summary" that is just the headline repeated
+        if s.lower() == gdelt_title.lower():
             continue
         score = len(target_words & set(t.split()))
         if score > best[1]:
@@ -281,8 +291,10 @@ def _fetch_headlines() -> list[dict]:
                 tone = None
             title = (a.get("title") or "")[:160]
             summary = _match_summary(summaries_by_tag.get(tag, []), title)
-            if not summary:
-                summary = title[:280]
+            # If no real summary is available, leave empty — never repeat
+            # the title verbatim (looks like duplicate text in the UI).
+            if not summary or summary.strip().lower() == title.strip().lower():
+                summary = ""
             topic_items.append({
                 "time": time_str or "",
                 "date": date_str or "",

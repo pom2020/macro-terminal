@@ -335,50 +335,99 @@ def gdelt_tone(query: str, *, timespan: str = "24h") -> float | None:
 # ---------------------------------------------------------------------------
 def google_news_rss(query: str, *, lang: str = "en", max_items: int = 10
                      ) -> list[dict]:
-    """Fetch Google News RSS for a query string. Returns simple dicts."""
+    """Fetch Google News RSS for a query string. Returns parsed items with
+    HTML-decoded, garbage-filtered summaries (Google News descriptions are
+    just <a href="rss redirect">title</a> wrappers — we drop those)."""
     try:
         r = _retry_get(
             "https://news.google.com/rss/search",
             params={"q": query, "hl": lang, "gl": "US", "ceid": "US:en"},
             timeout=10, max_retries=1,
         )
-        text = r.text
     except Exception as e:
         print(f"  !! google_news_rss({query[:30]!r}) failed: {e}")
         return []
-    # Lightweight RSS parser — no feedparser dependency
-    import re as _re
-    items: list[dict] = []
-    for m in _re.finditer(r"<item>(.*?)</item>", text, flags=_re.S):
-        block = m.group(1)
-        def field(name):
-            mm = _re.search(rf"<{name}[^>]*>(.*?)</{name}>", block, flags=_re.S)
-            if not mm: return ""
-            v = mm.group(1)
-            # CDATA strip
-            cd = _re.search(r"<!\[CDATA\[(.*?)\]\]>", v, flags=_re.S)
-            if cd: v = cd.group(1)
-            # Strip leftover HTML tags from description
-            v = _re.sub(r"<[^>]+>", " ", v).strip()
-            return v
-        items.append({
-            "title":   field("title"),
-            "link":    field("link"),
-            "pub":     field("pubDate"),
-            "summary": field("description"),
-            "source":  field("source"),
-        })
-        if len(items) >= max_items:
-            break
-    return items
+    return _parse_rss(r.text, max_items=max_items)
 
 
 # ---------------------------------------------------------------------------
 # Generic RSS feed parser — shared by Google News + Investing.com + OilPrice
 # ---------------------------------------------------------------------------
+def _clean_rss_text(raw: str) -> str:
+    """Decode HTML entities, strip tags, collapse whitespace.
+
+    Google News RSS wraps description in &lt;a href="..."&gt;...&lt;/a&gt;.
+    Without entity decoding first, our `<[^>]+>` regex misses these and we
+    end up displaying literal "<a href=...>" garbage in the UI.
+    """
+    import html as _html
+    import re as _re
+    if not raw:
+        return ""
+    # CDATA strip first
+    cd = _re.search(r"<!\[CDATA\[(.*?)\]\]>", raw, flags=_re.S)
+    if cd:
+        raw = cd.group(1)
+    # Decode entities (&lt; &gt; &amp; &quot; &#39; etc.)
+    raw = _html.unescape(raw)
+    # Strip HTML tags
+    raw = _re.sub(r"<[^>]+>", " ", raw)
+    # Collapse whitespace
+    raw = _re.sub(r"\s+", " ", raw).strip()
+    return raw
+
+
+def _is_rss_garbage(text: str) -> bool:
+    """Detect cleaned summaries that are too short / URL-heavy to be useful."""
+    if not text or len(text) < 20:
+        return True
+    low = text.lower()
+    if "news.google.com/rss/articles" in low:
+        return True
+    if low.startswith("http://") or low.startswith("https://"):
+        return True
+    url_chars = sum(1 for c in text if c in "/:?&=._-")
+    if url_chars / max(1, len(text)) > 0.40:
+        return True
+    return False
+
+
+def _is_redirect_only(raw_desc: str) -> bool:
+    """Check the RAW (un-cleaned) description for Google News-style redirect
+    link wrappers. These look like:
+        <a href="https://news.google.com/rss/articles/CB...">Title</a>&nbsp;
+        <font>Source</font>
+    After stripping tags they still read OK ("Title Source"), but they're
+    just title-duplicate + source-name — not actual body content. Detect
+    them on the raw text before stripping."""
+    if not raw_desc:
+        return False
+    import html as _html
+    import re as _re
+    # CDATA strip
+    cd = _re.search(r"<!\[CDATA\[(.*?)\]\]>", raw_desc, flags=_re.S)
+    if cd:
+        raw_desc = cd.group(1)
+    decoded = _html.unescape(raw_desc)
+    # Google News article-ID prefix
+    if "news.google.com/rss/articles" in decoded:
+        return True
+    if _re.search(r"rss/articles/CB[A-Za-z0-9_-]+", decoded):
+        return True
+    # If the text outside any <a>...</a> tag is < 10 chars, it was just an
+    # anchor wrapper (i.e. title-as-link + maybe a source tag).
+    no_anchor = _re.sub(r"<a\b[^>]*>.*?</a>", "", decoded,
+                         flags=_re.S | _re.I)
+    no_anchor = _re.sub(r"<[^>]+>", " ", no_anchor).strip()
+    if len(no_anchor) < 15:
+        return True
+    return False
+
+
 def _parse_rss(text: str, max_items: int = 30) -> list[dict]:
     """Lightweight RSS 2.0 / Atom parser. Returns list of dicts with
-    {title, link, pub, summary, source}."""
+    {title, link, pub, summary, source}. Summary is HTML-cleaned and
+    garbage-filtered (replaced with empty string if it's a redirect URL)."""
     import re as _re
     items: list[dict] = []
     for m in _re.finditer(r"<item>(.*?)</item>", text, flags=_re.S):
@@ -386,21 +435,32 @@ def _parse_rss(text: str, max_items: int = 30) -> list[dict]:
 
         def field(name):
             mm = _re.search(rf"<{name}[^>]*>(.*?)</{name}>", block, flags=_re.S)
-            if not mm:
-                return ""
-            v = mm.group(1)
-            cd = _re.search(r"<!\[CDATA\[(.*?)\]\]>", v, flags=_re.S)
-            if cd:
-                v = cd.group(1)
-            v = _re.sub(r"<[^>]+>", " ", v).strip()
-            return v
+            return _clean_rss_text(mm.group(1)) if mm else ""
+
+        title = field("title")
+        link = field("link")
+        pub = field("pubDate")
+        source = field("source")
+
+        # Two-stage garbage check on description: first the RAW HTML for
+        # Google-News-style anchor wrappers, then the cleaned text.
+        import re as _re2
+        raw_desc_match = _re2.search(
+            r"<description[^>]*>(.*?)</description>", block, flags=_re2.S)
+        raw_desc = raw_desc_match.group(1) if raw_desc_match else ""
+        if _is_redirect_only(raw_desc):
+            summary = ""
+        else:
+            summary = _clean_rss_text(raw_desc)
+            if _is_rss_garbage(summary):
+                summary = ""
 
         items.append({
-            "title":   field("title"),
-            "link":    field("link"),
-            "pub":     field("pubDate"),
-            "summary": field("description"),
-            "source":  field("source"),
+            "title":   title,
+            "link":    link,
+            "pub":     pub,
+            "summary": summary,
+            "source":  source,
         })
         if len(items) >= max_items:
             break
