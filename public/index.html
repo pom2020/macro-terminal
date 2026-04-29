@@ -5,10 +5,10 @@
   <title>MACRO — Global Economic Terminal</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <script>
-    /* Set this to your deployed Cloudflare Worker URL to enable the 60s
-       auto-refreshing ticker + live MOVE/VVIX/SKEW from Yahoo. Leave empty
-       to rely solely on the hourly ETL (which already covers everything). */
-    window.MACRO_WORKER_URL = window.MACRO_WORKER_URL || "";
+    /* Cloudflare Worker for live 60-second ticker refresh + MOVE/VVIX/SKEW.
+       Hardcoded so each build_public_html.js run preserves it. To disable,
+       set to empty string. */
+    window.MACRO_WORKER_URL = "https://macro-intraday.pom2020.workers.dev";
   </script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
