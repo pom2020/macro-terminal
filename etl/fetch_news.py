@@ -33,10 +33,10 @@ TOPIC_QUERIES = [
     ("ECB",     "EU", _en("ECB OR \"european central bank\" OR Lagarde")),
     ("DATA",    "US", _en("\"retail sales\" OR \"jobs report\" OR CPI OR PCE OR GDP")),
     ("BoJ",     "JP", _en("\"Bank of Japan\" OR BOJ OR Ueda OR yen")),
-    # Energy beat — replaces narrow OIL with broader energy commodity coverage
-    ("ENERGY",  "GL", _en("(\"oil prices\" OR brent OR WTI OR OPEC OR \"natural gas\" "
-                             "OR LNG OR \"gasoline prices\" OR \"crude oil\" OR refinery "
-                             "OR \"energy markets\")")),
+    # Energy beat — single-paren form so _en() doesn't double-wrap. Six core
+    # terms: enough breadth to surface daily news, short enough that GDELT's
+    # query parser doesn't hiccup.
+    ("ENERGY",  "GL", _en("oil OR OPEC OR \"natural gas\" OR LNG OR brent OR refinery")),
     ("CREDIT",  "US", _en("credit OR lending OR \"bond yields\" OR spreads")),
     ("FISCAL",  "US", _en("\"federal deficit\" OR \"national debt\" OR CBO")),
     # PBoC/China dropped — most articles came back filtered (non-English
