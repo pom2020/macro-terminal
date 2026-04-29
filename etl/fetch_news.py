@@ -129,7 +129,10 @@ def _match_summary(gnews_items: list[dict], gdelt_title: str) -> str:
 
 def _fetch_headlines() -> list[dict]:
     summaries_by_tag = _fetch_summaries_per_tag()
-    items: list[dict] = []
+    # Group articles by tag so we can round-robin and guarantee every
+    # topic (including ENERGY) makes it onto the page even when FED / ECB
+    # headlines are noisier in the same window.
+    items_by_tag: dict[str, list[dict]] = {}
     for tag, region, query in TOPIC_QUERIES:
         # First attempt: with sourcelang:english filter at GDELT
         articles = safe(gdelt_articles, query, max_records=6,
@@ -138,14 +141,17 @@ def _fetch_headlines() -> list[dict]:
         # empty result), retry without sourcelang and post-filter on the
         # article-level language field so we still get some content.
         if not articles:
-            # Strip the trailing " sourcelang:english" before retrying
             bare = query.replace(" sourcelang:english", "")
             articles = safe(gdelt_articles, bare, max_records=8,
                              timespan="48h", default=[]) or []
         # Defensive post-filter — drop articles GDELT explicitly tagged as
-        # non-English. Articles with no language tag pass (we trust the
-        # query-side filter or the source defaulting to English).
+        # non-English.
         articles = [a for a in articles if _is_english(a)]
+
+        # Sort each topic's own list by recency so the most recent appears first
+        articles.sort(key=lambda a: a.get("seendate") or "", reverse=True)
+
+        topic_items: list[dict] = []
         for a in articles:
             time_str, date_str = _format_seen_at(a.get("seendate"))
             tone = a.get("tone")
@@ -154,11 +160,10 @@ def _fetch_headlines() -> list[dict]:
             except (TypeError, ValueError):
                 tone = None
             title = (a.get("title") or "")[:160]
-            # Try to attach a real summary from Google News RSS by topic
             summary = _match_summary(summaries_by_tag.get(tag, []), title)
             if not summary:
-                summary = title[:280]   # fall back to title
-            items.append({
+                summary = title[:280]
+            topic_items.append({
                 "time": time_str or "",
                 "date": date_str or "",
                 "region": region,
@@ -168,22 +173,31 @@ def _fetch_headlines() -> list[dict]:
                 "tag": tag,
                 "title": title,
                 "summary": summary,
-                "moved": [],   # left empty; we don't have desk attribution
+                "moved": [],
+                "url": a.get("url") or "",       # public — used by <a href>
                 "_seendate": a.get("seendate") or "",
-                "_url": a.get("url") or "",
             })
-    # Sort newest first by raw seendate string (lexicographic == chronological)
-    items.sort(key=lambda x: x["_seendate"], reverse=True)
-    # De-dupe similar titles
+        items_by_tag[tag] = topic_items
+
+    # Round-robin: pick the Nth item from each topic in turn, so every topic
+    # is represented before any topic gets a second slot. Cap each topic at
+    # 3 articles to avoid one busy topic flooding the list.
     seen_titles: set[str] = set()
-    deduped: list[dict] = []
-    for it in items:
-        key = re.sub(r"\W+", "", it["title"].lower())[:60]
-        if key in seen_titles or not key:
-            continue
-        seen_titles.add(key)
-        deduped.append(it)
-    return deduped[:12]
+    final: list[dict] = []
+    max_per_topic = 3
+    for round_num in range(max_per_topic):
+        for tag in items_by_tag:
+            bucket = items_by_tag[tag]
+            if round_num >= len(bucket):
+                continue
+            it = bucket[round_num]
+            key = re.sub(r"\W+", "", it["title"].lower())[:60]
+            if not key or key in seen_titles:
+                continue
+            seen_titles.add(key)
+            final.append(it)
+    # Cap total to keep UI compact
+    return final[:14]
 
 
 # Map FRED release names → (event display name, impact)

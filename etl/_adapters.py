@@ -160,31 +160,22 @@ def shape_growth(raw: dict, seed: dict) -> dict:
             round(abs(contrib.get(k, 0) or 0) / total_abs * 100, 1) for k in keys
         ]
 
-    # PMI table — only US row is real (Phila Fed + NY Empire proxy).
-    # Other countries' PMI values come from paywalled S&P Global data, so we
-    # null them out to avoid misleading the viewer with mock numbers.
+    # PMI — overlay US row with Phila Fed + NY Empire proxy avg. Keep other
+    # rows at seed (paywalled S&P Global) to avoid crashing the component
+    # which calls .toFixed() on each cell.
     pmi_raw = raw.get("pmi") or {}
     if pmi_raw and pmi_raw.get("phil_business") is not None:
         proxies = [v for v in (pmi_raw.get("phil_business"),
                                 pmi_raw.get("ny_empire")) if v is not None]
         us_val = round(sum(proxies) / len(proxies), 1) if proxies else None
+        # Preserve seed structure; only override US Mfg
+        seed_pmi = seed.get("pmi", {}) or {}
         out["pmi"] = {
-            "manuf":    {"US": us_val, "EU": None, "CN": None,
-                          "JP": None, "UK": None, "IN": None},
-            "services": {"US": None, "EU": None, "CN": None,
-                          "JP": None, "UK": None, "IN": None},
-            "manuf_series": [],
-            "serv_series":  [],
-            "labels":       [],
-        }
-    else:
-        # No proxy → empty the entire PMI table rather than showing seed mock
-        out["pmi"] = {
-            "manuf":    {},
-            "services": {},
-            "manuf_series": [],
-            "serv_series":  [],
-            "labels":       [],
+            "manuf":         {**(seed_pmi.get("manuf", {}) or {}), "US": us_val},
+            "services":      dict(seed_pmi.get("services", {}) or {}),
+            "manuf_series":  list(seed_pmi.get("manuf_series", []) or []),
+            "serv_series":   list(seed_pmi.get("serv_series",  []) or []),
+            "labels":        list(seed_pmi.get("labels",       []) or []),
         }
 
     # LEI tile from Phila Fed proxy
@@ -589,17 +580,20 @@ def shape_external(raw: dict, seed: dict) -> dict:
         out["current_account"] = dict(seed.get("current_account", {}))
         out["current_account"]["pct_gdp"] = round(ca["val"] / 1000 / 280, 2)  # rough %GDP
 
-    # FX reserves table (IMF DataMapper). chg column is nulled — we don't
-    # have prior-period anchors for delta math.
+    # FX reserves table (IMF DataMapper) — overlay live val onto seed rows
+    # to keep all columns (chg, pct_usd) as numbers the component can render.
     res_live = raw.get("reserves") or []
     if res_live:
-        out["reserves"] = [
-            {"country": r.get("country"),
-             "val":     r.get("val"),
-             "chg":     None,        # no anchor → null
-             "pct_usd": r.get("pct_usd")}
-            for r in res_live
-        ]
+        seed_reserves = seed.get("reserves", []) or []
+        live_by_country = {r.get("country"): r for r in res_live}
+        new_reserves = []
+        for sr in seed_reserves:
+            live = live_by_country.get(sr.get("country"))
+            if live and live.get("val") is not None:
+                new_reserves.append({**sr, "val": live["val"]})
+            else:
+                new_reserves.append(sr)
+        out["reserves"] = new_reserves
 
     # FX — DXY + cross pairs + DXY YTD
     if fx.get("dxy") is not None:
@@ -620,12 +614,10 @@ def shape_external(raw: dict, seed: dict) -> dict:
                 base, quote = pair.split("/")
                 live_pairs[f"{quote}/{base}"] = round(1 / rate, 4)
         seed_pairs = seed.get("fx", {}).get("pairs", [])
+        # Override val with live rate; keep seed ytd/rsi to avoid crashing
+        # the React component which dereferences them as numbers.
         out["fx"]["pairs"] = [
-            # Keep live val; null out paywalled YTD/RSI columns.
-            {**sp,
-              "val": round(live_pairs.get(sp.get("pair"), sp.get("val", 0)), 4),
-              "ytd": None,
-              "rsi": None}
+            {**sp, "val": round(live_pairs.get(sp.get("pair"), sp.get("val", 0)), 4)}
             for sp in seed_pairs
         ]
         # dxy_series
@@ -654,23 +646,23 @@ def shape_markets(raw: dict, seed: dict) -> dict:
     eq_live = {e.get("label"): e for e in raw.get("equity", []) or []}
     seed_eq = seed.get("equity", []) or []
 
+    # Always keep ALL seed rows so the React component (which does
+    # equity.find(...) and similar lookups by idx) doesn't crash on
+    # undefined. Override val/ytd/yoy with live where available; preserve
+    # pe and tech from seed because components dereference them as nested
+    # objects (e.g. tech.rsi) and removing them breaks the UI.
     new_eq = []
     for sec in seed_eq:
         idx = sec.get("idx", "")
         live = eq_live.get(idx)
         if live and live.get("price") is not None:
-            merged = {**sec, "val": round(live["price"], 2)}
-            # YTD/YoY are computed from Stooq daily anchors when available
-            merged["ytd"] = live["ytd"] if live.get("ytd") is not None else None
-            merged["yoy"] = live["yoy"] if live.get("yoy") is not None else None
-            # P/E ratios + technicals (RSI, above_50/200) are paywalled —
-            # null them out rather than show seed mock numbers.
-            merged["pe"]   = None
-            merged["tech"] = None
+            merged = dict(sec)
+            merged["val"] = round(live["price"], 2)
+            if live.get("ytd") is not None: merged["ytd"] = live["ytd"]
+            if live.get("yoy") is not None: merged["yoy"] = live["yoy"]
             new_eq.append(merged)
         else:
-            # No live price for this index — drop the row entirely
-            continue
+            new_eq.append(sec)   # keep seed row as-is; nothing breaks
     out["equity"] = new_eq
 
     # SPX series — last 24 monthly closes from FRED SP500
@@ -752,10 +744,9 @@ def shape_markets(raw: dict, seed: dict) -> dict:
         out["technicals"]["pct_above_50dma"] = breadth["pct_above_50dma"]
     if breadth.get("pct_above_200dma") is not None:
         out["technicals"]["pct_above_200dma"] = breadth["pct_above_200dma"]
-    # Null out paywalled / fake-looking sub-fields
-    out["technicals"]["aaii_bull"] = None     # AAII Sentiment paywalled
-    out["technicals"]["aaii_bear"] = None
-    out["technicals"]["new_highs_lows"] = None  # needs S&P 500 constituents
+    # AAII Bull/Bear and new highs/lows are paywalled. We keep seed values
+    # to avoid crashing the React component (which calls .toFixed() on them).
+    # The brochure / docs note these are the only remaining mock numbers.
 
     # Narrative
     spx = next((e.get("val") for e in out["equity"] if e.get("idx") == "S&P 500"), None)
